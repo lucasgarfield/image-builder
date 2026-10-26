@@ -1,3 +1,5 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 # image-builder CLI
 
 Build images from the command line in a convenient way.
