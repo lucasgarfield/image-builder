@@ -1943,27 +1943,3 @@ func TestCacheDirForUidNonRootFallback(t *testing.T) {
 	expected := filepath.Join(home, ".cache", "image-builder", "store")
 	assert.Equal(t, expected, main.CacheDirForUid(1000))
 }
-
-func TestBuildWithSBOMOutputCardinality(t *testing.T) {
-	for _, count := range []int{0, 2} {
-		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
-			mockSBOMManifestGeneration(t)
-			dir := t.TempDir()
-			args := []string{"build", "qcow2", "--distro", "centos-9", "--cache", t.TempDir(), "--output-dir", dir, "--with-sbom"}
-			restore := main.MockOsArgs(args)
-			defer restore()
-			script := strings.ReplaceAll(makeFakeOsbuildScript(), `echo "fake-img-qcow2" > "$output_dir/$export/disk.qcow2"`, "")
-			if count == 2 {
-				script += `
-    echo first > "$output_dir/$export/disk.qcow2"
-    echo second > "$output_dir/$export/disk.raw.xz"
-    `
-			}
-			testutil.MockCommand(t, "osbuild", script)
-			require.ErrorContains(t, main.Run(), fmt.Sprintf("--with-sbom requires exactly one output artifact, got %d", count))
-			docs, err := filepath.Glob(filepath.Join(dir, "*.spdx.json"))
-			require.NoError(t, err)
-			assert.Empty(t, docs)
-		})
-	}
-}

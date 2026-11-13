@@ -201,6 +201,15 @@ $ ls fedora-43-server-qcow2-x86_64/*.spdx.json
 fedora-43-server-qcow2-x86_64/fedora-43-server-qcow2-x86_64.spdx.json
 ```
 
+For a multi-step build, first initialize the task with `--image-type`, then enable SBOM output on `task build-image`. The SBOM is written alongside the image in the task's working directory:
+
+```console
+$ image-builder task init --distro fedora-43 --image-type server-qcow2 ./my-task
+$ image-builder task prefetch ./my-task
+$ sudo image-builder task build-image --with-sbom ./my-task
+# ...
+```
+
 The `manifest` command does not support `--with-sbom`: SBOM output requires a built image.
 
 This MVP targets vulnerability and VEX matching in Konflux. It supports package-based (RPM) images only, not bootc or OSTree images, and cannot be combined with `--with-extra` (sysexts). Embedded container inventory is not included.

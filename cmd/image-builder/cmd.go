@@ -499,6 +499,7 @@ func setupTaskBuildCmd() *cobra.Command {
 	}
 
 	taskBuildCmd.Flags().String("format", "", "Output in a specific format (json)")
+	taskBuildCmd.Flags().Bool("with-sbom", false, `export an RPM-only SPDX SBOM (no extras, bootc, or OSTree images)`)
 	progressFlag(taskBuildCmd)
 	return taskBuildCmd
 }

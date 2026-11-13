@@ -1065,6 +1065,10 @@ type taskInfo struct {
 	// metrics, etc)
 	OutputBasename string `json:"basename"`
 
+	// SBOMUnsupported is true when the image is built from a bootc container
+	// or an ostree ref, so an SBOM cannot list its packages.
+	SBOMUnsupported bool `json:"sbom_unsupported"`
+
 	// Write the log output from the build to a file
 	Buildlog bool `json:"buildlog"`
 
@@ -1107,6 +1111,10 @@ func cmdTaskInit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	bootcRef, err := cmd.Flags().GetString("bootc-ref")
+	if err != nil {
+		return err
+	}
 	opts := &cmdManifestWrapperOptions{
 		// NOTE: The multi-step build feature is intended for build systems
 		// that need to separate actions which require network access
@@ -1139,6 +1147,9 @@ func cmdTaskInit(cmd *cobra.Command, args []string) error {
 	// (args[0]) to get the image type name.
 	result, err := generateManifest(pbar, cmd, []string{imgType}, img, io.Discard, opts)
 	if err != nil {
+		return err
+	}
+	if err := writeTaskSBOMContents(workdir, result.Packages); err != nil {
 		return err
 	}
 
@@ -1198,6 +1209,7 @@ func cmdTaskInit(cmd *cobra.Command, args []string) error {
 	ti := taskInfo{
 		Exports:             exportFilenames,
 		OutputBasename:      imgBasename,
+		SBOMUnsupported:     bootcRef != "" || img.ImgType.OSTreeRef() != "",
 		Buildlog:            writeBuildlog,
 		Metrics:             writeMetrics,
 		InVM:                invm,
@@ -1359,6 +1371,31 @@ func cmdTaskBuild(cmd *cobra.Command, args []string) error {
 	for name := range task.Exports {
 		exports = append(exports, name)
 	}
+	// A task created with --with-extra exports more than the primary image.
+	// Those extras are labeled payload, so the SBOM would incorrectly list
+	// the sysext's packages.
+	withSBOM, err := cmd.Flags().GetBool("with-sbom")
+	if err != nil {
+		return err
+	}
+	if withSBOM && len(exports) > 1 {
+		return errSBOMWithExtra
+	}
+	// A task created from a bootc or ostree-based image cannot describe its
+	// packages in an SBOM.
+	if withSBOM && task.SBOMUnsupported {
+		return errSBOMWithOSTree
+	}
+	// Fail before osbuild so a missing or invalid sidecar does not follow a
+	// completed build.
+	var packages []sbom.Package
+	if withSBOM {
+		var err error
+		packages, err = readTaskSBOMContents(taskdir)
+		if err != nil {
+			return err
+		}
+	}
 
 	if task.Buildlog {
 		buildLogWriter, err := openBuildLogWriter(taskdir, task.OutputBasename)
@@ -1373,9 +1410,18 @@ func cmdTaskBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err = renameExports(exports, taskdir, task.Exports)
+	outputPaths, err := renameExports(exports, taskdir, task.Exports)
+	if err != nil {
+		return err
+	}
 
-	return err
+	if !withSBOM {
+		return nil
+	}
+	if len(outputPaths) != 1 {
+		return fmt.Errorf("--with-sbom requires exactly one output artifact, got %d", len(outputPaths))
+	}
+	return writeImageSBOM(taskdir, task.OutputBasename, outputPaths[0], packages)
 }
 
 func readTaskInfo(workdir string) (taskInfo, error) {
