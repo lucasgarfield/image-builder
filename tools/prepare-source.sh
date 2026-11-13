@@ -2,9 +2,10 @@
 
 set -eux
 
-# Go version must be consistent with image-builder which uses UBI
-# container that is typically few months behind
-GO_VERSION=1.25.14
+# Keep in sync with go.mod's go directive and the oldest Go shipped by the
+# downstream toolsets we build with (RHEL/UBI go-toolset, supported Fedora
+# golang).
+GO_VERSION=1.26.10
 GO_BINARY=$(go env GOPATH)/bin/go$GO_VERSION
 
 # this is the official way to get a different version of golang
