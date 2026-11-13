@@ -1,5 +1,6 @@
 # allow TODO and XXX in the whole file
 # pylint: disable=fixme
+import hashlib
 import json
 import os
 import pathlib
@@ -37,11 +38,21 @@ def test_build_builds_image(tmp_path, build_container, shared_store, use_librepo
         "build",
         "qcow2",
         "--distro", "centos-9",
+        "--with-sbom",
         f"--use-librepo={use_librepo}",
     ])
     arch = "x86_64"
     basename = f"centos-9-qcow2-{arch}"
-    assert (output_dir / basename / f"{basename}.qcow2").exists()
+    image = output_dir / basename / f"{basename}.qcow2"
+    digest = hashlib.sha256()
+    with image.open("rb") as image_file:
+        for chunk in iter(lambda: image_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    doc = json.loads((image.parent / f"{basename}.spdx.json").read_text())
+    assert doc["spdxVersion"] == "SPDX-2.3"
+    assert any(p["name"] == "glibc" for p in doc["packages"])
+    root = next(p for p in doc["packages"] if p["name"] == basename)
+    assert {"algorithm": "SHA256", "checksumValue": digest.hexdigest()} in root["checksums"]
     # XXX: ensure no other leftover dirs
     dents = os.listdir(output_dir)
     assert len(dents) == 1, f"too many dentries in output dir: {dents}"

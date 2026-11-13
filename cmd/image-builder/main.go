@@ -45,6 +45,15 @@ var (
 	osStdout         io.Writer = os.Stdout
 	osStderr         io.Writer = os.Stderr
 	bootcResolveInfo           = bootc.ResolveBootcInfo
+
+	// Extras share the payload pipeline label, so package collection cannot
+	// tell a sysext's packages from the image's. Refuse rather than emit that SBOM.
+	errSBOMWithExtra = errors.New("--with-sbom cannot be combined with --with-extra: the SBOM would incorrectly list the sysext's packages")
+
+	// OSTree-based images, including bootc images, do not install their content
+	// from the payload package sets. Refuse rather than emit an SBOM that omits
+	// the image's packages.
+	errSBOMWithOSTree = errors.New("--with-sbom cannot be used with --bootc-ref or an ostree-based image type: the SBOM would not list the image's packages")
 )
 
 // cacheDirForUid returns the cache directory for the given uid.
@@ -528,62 +537,58 @@ func resolveExtras(patterns []string, available []string) ([]string, error) {
 	return resolved, nil
 }
 
-func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []string, img *imagefilter.Result, wd io.Writer, wrapperOpts *cmdManifestWrapperOptions) ([]byte, error) {
+func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []string, img *imagefilter.Result, wd io.Writer, wrapperOpts *cmdManifestWrapperOptions) (manifestgen.Result, error) {
 	if wrapperOpts == nil {
 		wrapperOpts = &cmdManifestWrapperOptions{}
 	}
 	repoDir, err := cmd.Flags().GetString("force-repo-dir")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	rpmmdCacheDir, err := cmd.Flags().GetString("rpmmd-cache")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	extraRepos, err := cmd.Flags().GetStringArray("extra-repo")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	forceRepos, err := cmd.Flags().GetStringArray("force-repo")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	distroStr, err := cmd.Flags().GetString("distro")
 	if err != nil {
-		return nil, err
-	}
-	withSBOM, err := cmd.Flags().GetBool("with-sbom")
-	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	withRPMList, err := cmd.Flags().GetBool("with-rpmlist")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	ignoreWarnings, err := cmd.Flags().GetBool("ignore-warnings")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	outputDir, err := cmd.Flags().GetString("output-dir")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	ostreeImgOpts, err := ostreeImageOptions(cmd)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	useLibrepo, err := cmd.Flags().GetBool("use-librepo")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	bootcRemote, err := cmd.Flags().GetBool("bootc-pull-container")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	var imageSize datasizes.Size
 	err = cmd.Flags().GetText("image-size", &imageSize)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 
 	var preview *bool
@@ -594,7 +599,7 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 	if cmd.Flags().Lookup("preview").Changed {
 		value, err := cmd.Flags().GetBool("preview")
 		if err != nil {
-			return nil, err
+			return manifestgen.Result{}, err
 		}
 		preview = &value
 	}
@@ -604,34 +609,34 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 	}
 	blueprintPath, err := cmd.Flags().GetString("blueprint")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	var customSeed *int64
 	if cmd.Flags().Changed("seed") {
 		seedFlagVal, err := cmd.Flags().GetInt64("seed")
 		if err != nil {
-			return nil, err
+			return manifestgen.Result{}, err
 		}
 		customSeed = &seedFlagVal
 	}
 	subscription, err := subscriptionImageOptions(cmd)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	bootcRef, err := cmd.Flags().GetString("bootc-ref")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	if bootcRef != "" && distroStr != "" {
-		return nil, fmt.Errorf("cannot use --distro with --bootc-ref")
+		return manifestgen.Result{}, fmt.Errorf("cannot use --distro with --bootc-ref")
 	}
 	bootcInstallerPayloadRef, err := cmd.Flags().GetString("bootc-installer-payload-ref")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	bootcOmitDefaultKernelArgs, err := cmd.Flags().GetBool("bootc-no-default-kernel-args")
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 
 	// no error check here as this is (deliberately) not defined on
@@ -641,7 +646,7 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 
 	bp, err := blueprintload.Load(blueprintPath)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	if bootcRef == "" {
 		distroStr = img.ImgType.Arch().Distro().Name()
@@ -673,21 +678,17 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 
 	repos, err := newRepoRegistry(repoDir, extraRepos)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 
 	imgBasename, err := basenameFor(img, outputFilename)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 
 	imgOutputDir, err := resolveOutputDir(outputDir, img)
 	if err != nil {
-		return nil, err
-	}
-
-	if withSBOM {
-		mgOptions.SBOMWriter = initSBOMWriter(imgBasename, imgOutputDir)
+		return manifestgen.Result{}, err
 	}
 
 	if withRPMList {
@@ -697,7 +698,7 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 	if len(forceRepos) > 0 {
 		forcedRepos, err := parseRepoURLs(forceRepos, "forced")
 		if err != nil {
-			return nil, err
+			return manifestgen.Result{}, err
 		}
 		mgOptions.OverrideRepos = forcedRepos
 	}
@@ -707,7 +708,7 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 
 	mg, err := manifestgen.New(repos, &mgOptions)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 
 	imgOpts := &distro.ImageOptions{
@@ -723,16 +724,17 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 		Preview: preview,
 	}
 
-	mf, err := mg.Generate(bp, img.ImgType, imgOpts)
+	result, err := mg.Generate(bp, img.ImgType, imgOpts)
 	if err != nil {
-		return nil, err
+		return manifestgen.Result{}, err
 	}
 	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, mf.Manifest, "", "    "); err != nil {
-		return nil, err
+	if err := json.Indent(&pretty, result.Manifest, "", "    "); err != nil {
+		return manifestgen.Result{}, err
 	}
 
-	return append(pretty.Bytes(), '\n'), nil
+	result.Manifest = append(pretty.Bytes(), '\n')
+	return result, nil
 }
 
 func cmdManifest(cmd *cobra.Command, args []string) error {
@@ -747,11 +749,11 @@ func cmdManifest(cmd *cobra.Command, args []string) error {
 	opts := &cmdManifestWrapperOptions{
 		useBootstrapIfNeeded: true,
 	}
-	mf, err := generateManifest(pbar, cmd, args, img, io.Discard, opts)
+	result, err := generateManifest(pbar, cmd, args, img, io.Discard, opts)
 	if err != nil {
 		return err
 	}
-	_, err = osStdout.Write(mf)
+	_, err = osStdout.Write(result.Manifest)
 	return err
 }
 
@@ -792,6 +794,24 @@ func cmdBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	withSBOM, err := cmd.Flags().GetBool("with-sbom")
+	if err != nil {
+		return err
+	}
+	// Extras are still labeled payload, so the SBOM would incorrectly list
+	// the sysext's packages. Refuse the combination until that is fixed.
+	if withSBOM && len(withExtraPatterns) > 0 {
+		return errSBOMWithExtra
+	}
+	// Bootc images are built from a container and do not install their content
+	// from the payload package sets.
+	bootcRef, err := cmd.Flags().GetString("bootc-ref")
+	if err != nil {
+		return err
+	}
+	if withSBOM && bootcRef != "" {
+		return errSBOMWithOSTree
+	}
 	withBuildlog, err := cmd.Flags().GetBool("with-buildlog")
 	if err != nil {
 		return err
@@ -828,6 +848,9 @@ func cmdBuild(cmd *cobra.Command, args []string) error {
 	img, err := getImage(cmd, args[0])
 	if err != nil {
 		return err
+	}
+	if withSBOM && img.ImgType.OSTreeRef() != "" {
+		return errSBOMWithOSTree
 	}
 	withExtras, err := resolveExtras(withExtraPatterns, img.ImgType.Extras())
 	if err != nil {
@@ -870,9 +893,18 @@ func cmdBuild(cmd *cobra.Command, args []string) error {
 
 	// We discard any warnings from the depsolver until we figure out a better
 	// idea (likely in manifestgen)
-	mf, err := generateManifest(pbar, cmd, args, img, io.Discard, opts)
+	result, err := generateManifest(pbar, cmd, args, img, io.Discard, opts)
 	if err != nil {
 		return err
+	}
+
+	if withSBOM {
+		if err := validateSBOMPackages(result.Packages); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(outputDir, basename)), 0755); err != nil {
+			return err
+		}
 	}
 
 	bootMode := img.ImgType.BootMode()
@@ -906,7 +938,7 @@ func cmdBuild(cmd *cobra.Command, args []string) error {
 		buildOpts.InVm = []string{"image"}
 	}
 	pbar.SetPulseMsgf("Image building step")
-	outputPaths, err := buildImage(pbar, img, mf, buildOpts)
+	outputPaths, err := buildImage(pbar, img, result.Manifest, buildOpts)
 	if err != nil {
 		return err
 	}
@@ -914,7 +946,15 @@ func cmdBuild(cmd *cobra.Command, args []string) error {
 	for _, p := range outputPaths {
 		fmt.Fprintf(osStdout, "Image build successful: %s\n", p)
 	}
+	if withSBOM && len(outputPaths) != 1 {
+		return fmt.Errorf("--with-sbom requires exactly one output artifact, got %d", len(outputPaths))
+	}
 	imagePath := outputPaths[0]
+	if withSBOM {
+		if err := writeImageSBOM(outputDir, basename, imagePath, result.Packages); err != nil {
+			return err
+		}
+	}
 
 	pbar, err = progressFromCmd(cmd, progress.ProgressConfig{
 		FilePath: filepath.Join(outputDir, fmt.Sprintf("%s.progress", basename)),
@@ -1097,7 +1137,7 @@ func cmdTaskInit(cmd *cobra.Command, args []string) error {
 
 	// Same as above: It reads the first element of the third argument
 	// (args[0]) to get the image type name.
-	mf, err := generateManifest(pbar, cmd, []string{imgType}, img, io.Discard, opts)
+	result, err := generateManifest(pbar, cmd, []string{imgType}, img, io.Discard, opts)
 	if err != nil {
 		return err
 	}
@@ -1173,7 +1213,7 @@ func cmdTaskInit(cmd *cobra.Command, args []string) error {
 	}
 
 	manifestPath := resolveTaskManifestName(workdir, imgBasename)
-	if err := os.WriteFile(manifestPath, mf, 0o600); err != nil {
+	if err := os.WriteFile(manifestPath, result.Manifest, 0o600); err != nil {
 		return err
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,4 +93,12 @@ func TestVerboseFlagEnablesLogging(t *testing.T) {
 			assert.Equal(t, tc.want, ilog.Default().Writer())
 		})
 	}
+}
+
+func TestWriteImageSBOMFailureRemovesStaleDocument(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "image.spdx.json")
+	require.NoError(t, os.WriteFile(path, []byte("previous document"), 0o600))
+	require.ErrorContains(t, writeImageSBOM(dir, "image", filepath.Join(dir, "missing.qcow2"), nil), "hashing built image for SBOM")
+	assert.NoFileExists(t, path)
 }

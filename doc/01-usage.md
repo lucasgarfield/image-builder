@@ -170,13 +170,6 @@ $ ls *.osbuild-manifest.json
 fedora-43-server-qcow2-x86_64.osbuild-manifest.json
 ```
 
-`--with-sbom` places an [SPDX](https://spdx.dev/) Software Bill of Materials document alongside the image.
-
-```console
-$ sudo image-builder build --with-sbom --distro fedora-43 server-qcow2
-# ...
-```
-
 `--with-buildlog` writes the full osbuild build log to `<basename>.buildlog` in the output directory. This can be useful for debugging failed or unexpected builds.
 
 ```console
@@ -196,6 +189,23 @@ Metrics:
 	build: org.osbuild.rpm: 15s
 	os: org.osbuild.selinux: 5s
 ```
+
+#### SBOM
+
+`--with-sbom` writes one SPDX 2.3 JSON SBOM as `<basename>.spdx.json` alongside the built image in the output directory. The SBOM is rooted at the built image, identified by its SHA-256 digest, and lists its RPM packages rather than producing separate SBOMs per pipeline.
+
+```console
+$ sudo image-builder build --with-sbom --distro fedora-43 server-qcow2
+# ...
+$ ls fedora-43-server-qcow2-x86_64/*.spdx.json
+fedora-43-server-qcow2-x86_64/fedora-43-server-qcow2-x86_64.spdx.json
+```
+
+The `manifest` command does not support `--with-sbom`: SBOM output requires a built image.
+
+This MVP targets vulnerability and VEX matching in Konflux. It supports package-based (RPM) images only, not bootc or OSTree images, and cannot be combined with `--with-extra` (sysexts). Embedded container inventory is not included.
+
+License information and the package dependency graph are intentionally omitted. RPM license tags are not guaranteed to be valid SPDX expressions (e.g. legacy tags in RHEL/CentOS 9), and the current serializer cannot reliably represent the extracted licensing information needed for non-SPDX tags.
 
 ### ostree
 
