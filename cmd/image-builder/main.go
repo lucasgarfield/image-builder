@@ -1453,13 +1453,6 @@ func checkTaskVersion(task taskInfo) error {
 	return nil
 }
 
-func initSBOMWriter(sbomBasename string, sbomDir string) manifestgen.SBOMWriterFunc {
-	return func(filename string, content io.Reader, docType sbom.StandardType) error {
-		filename = fmt.Sprintf("%s.%s", sbomBasename, strings.SplitN(filename, ".", 2)[1])
-		return fileWriter(sbomDir, filename, content)
-	}
-}
-
 func initRPMListWriter(rpmBasename, rpmDir string) manifestgen.RPMListWriterFunc {
 	return func(filename string, content io.Reader) error {
 		filename = fmt.Sprintf("%s.%s", rpmBasename, filename)

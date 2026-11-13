@@ -1,9 +1,7 @@
 package manifestgen
 
 import (
-	"bytes"
 	"cmp"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,9 +27,6 @@ import (
 )
 
 const (
-	defaultDepsolverSBOMType = sbom.StandardTypeSpdx
-	defaultSBOMExt           = "spdx.json"
-
 	defaultDepsolveCacheDir = "osbuild-depsolve-dnf"
 )
 
@@ -50,11 +45,6 @@ type Options struct {
 	// RpmDownloader allows to switch between the librepo and
 	// libcurl download backends.
 	RpmDownloader osbuild.RpmDownloader
-
-	// SBOMWriter will be called for each generated SBOM the
-	// filename contains the suggest filename string and the
-	// content can be read
-	SBOMWriter SBOMWriterFunc
 
 	// WarningsOutput will receive any warnings that are part of
 	// the manifest generation. If it is unset any warnings will
@@ -97,7 +87,6 @@ type Generator struct {
 	containerResolver      ContainerResolverFunc
 	commitResolver         CommitResolverFunc
 	flatpakResolver        FlatpakResolverFunc
-	sbomWriter             SBOMWriterFunc
 	warningsOutput         io.Writer
 	depsolveWarningsOutput io.Writer
 
@@ -125,7 +114,6 @@ func New(reporegistry *reporegistry.RepoRegistry, opts *Options) (*Generator, er
 		containerResolver:      opts.ContainerResolver,
 		commitResolver:         opts.CommitResolver,
 		rpmDownloader:          opts.RpmDownloader,
-		sbomWriter:             opts.SBOMWriter,
 		warningsOutput:         opts.WarningsOutput,
 		depsolveWarningsOutput: opts.DepsolveWarningsOutput,
 		customSeed:             opts.CustomSeed,
@@ -263,31 +251,6 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 		return Result{}, err
 	}
 
-	if mg.sbomWriter != nil {
-		for plName, depsolvedPipeline := range depsolved {
-			pipelinePurpose := "unknown"
-			switch {
-			case slices.Contains(preManifest.PayloadPipelines(), plName):
-				pipelinePurpose = "image"
-			case slices.Contains(preManifest.BuildPipelines(), plName):
-				pipelinePurpose = "buildroot"
-			}
-			// XXX: sync with image-builder-cli:build.go name generation - can we have a shared helper?
-			imageName := fmt.Sprintf("%s-%s-%s", dist.Name(), imgType.Name(), a.Name())
-			if mg.sbomWriter != nil {
-				sbomDocOutputFilename := fmt.Sprintf("%s.%s-%s.%s", imageName, pipelinePurpose, plName, defaultSBOMExt)
-				var buf bytes.Buffer
-				enc := json.NewEncoder(&buf)
-				if err := enc.Encode(depsolvedPipeline.SBOM.Document); err != nil {
-					return Result{}, err
-				}
-				if err := mg.sbomWriter(sbomDocOutputFilename, &buf, depsolvedPipeline.SBOM.DocType); err != nil {
-					return Result{}, err
-				}
-			}
-		}
-	}
-
 	// The rpmlist needs full depsolve records; the returned inventory must
 	// project away repository credentials and download URLs.
 	payload := preManifest.PayloadPipelines()
@@ -390,12 +353,6 @@ func DefaultDepsolve(solver *depsolvednf.Solver, cacheDir string, depsolveWarnin
 		solver.Stderr = depsolveWarningsOutput
 	}
 
-	// Always generate Spdx SBOMs for now, this makes the
-	// default depsolve slightly slower but it means we
-	// need no extra argument here to select the SBOM
-	// type. Once we have more types than Spdx of course
-	// we need to add a option to select the type.
-	solver.SetSBOMType(sbom.StandardTypeSpdx)
 	return solver.DepsolveAll(packageSets)
 }
 
@@ -407,8 +364,6 @@ type (
 	CommitResolverFunc func(commitSources map[string][]ostree.SourceSpec) (map[string][]ostree.CommitSpec, error)
 
 	FlatpakResolverFunc func(flatpakSources map[string][]flatpak.SourceSpec) (map[string][]flatpak.Spec, error)
-
-	SBOMWriterFunc func(filename string, content io.Reader, docType sbom.StandardType) error
 
 	RPMListWriterFunc func(filename string, content io.Reader) error
 )

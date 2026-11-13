@@ -12,9 +12,9 @@ import (
 	"github.com/protobom/protobom/pkg/writer"
 )
 
-// SBOM is a single software bill of materials document. Create one with
+// Document is a single software bill of materials document. Create one with
 // Generate and serialize it with Write.
-type SBOM struct{ doc *pb.Document }
+type Document struct{ doc *pb.Document }
 
 // ToolInfo identifies the program that created an SBOM.
 type ToolInfo struct {
@@ -74,7 +74,7 @@ const (
 // is rooted at the image: it DESCRIBES the image and the image CONTAINS a node
 // for each package. Call it once the image's SHA-256 is known; there is no
 // earlier manifest-rooted document to rewrite.
-func Generate(in Inputs) (*SBOM, error) {
+func Generate(in Inputs) (*Document, error) {
 	if in.Image.Name == "" {
 		return nil, errors.New("image name is missing")
 	}
@@ -117,11 +117,11 @@ func Generate(in Inputs) (*SBOM, error) {
 		})
 	}
 
-	return &SBOM{doc: doc}, nil
+	return &Document{doc: doc}, nil
 }
 
 // Write serializes the SBOM to w in the given format.
-func (s *SBOM) Write(w io.Writer, f Format) error {
+func (s *Document) Write(w io.Writer, f Format) error {
 	if f != FormatSPDX23JSON {
 		return fmt.Errorf("unsupported SBOM format %q", f)
 	}

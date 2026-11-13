@@ -73,7 +73,7 @@ type spdxDoc struct {
 	Relationships []spdxRelationship `json:"relationships"`
 }
 
-func writeSPDX(t *testing.T, s *sbom.SBOM) spdxDoc {
+func writeSPDX(t *testing.T, s *sbom.Document) spdxDoc {
 	t.Helper()
 
 	var buf bytes.Buffer
