@@ -2,6 +2,7 @@ package manifestgen
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,9 +158,21 @@ func New(reporegistry *reporegistry.RepoRegistry, opts *Options) (*Generator, er
 	return mg, nil
 }
 
+// Result is a generated manifest and its depsolved payload RPM inventory.
+type Result struct {
+	// Manifest is the serialized osbuild manifest.
+	Manifest []byte
+
+	// Packages is the union of depsolved RPMs from payload pipelines (including
+	// extras), excluding buildroot tooling. It is not a full image inventory:
+	// packages inside OSTree commits, bootc images, and containers are not inspected.
+	// Only SBOM fields are retained, never repository or download credentials.
+	Packages []sbom.Package
+}
+
 // Generate will generate a new manifest for the given distro/imageType/arch
 // combination.
-func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType, imgOpts *distro.ImageOptions) ([]byte, error) {
+func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType, imgOpts *distro.ImageOptions) (Result, error) {
 	if imgOpts == nil {
 		imgOpts = &distro.ImageOptions{}
 	}
@@ -174,7 +187,7 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 		var err error
 		repos, err = mg.reporegistry.ReposByImageTypeName(dist.Name(), a.Name(), imgType.Name())
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 	}
 	// To support "user" a.k.a. "3rd party" repositories, these
@@ -183,19 +196,19 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 	// for the given image type, see e.g. distro/rhel/imagetype.go:Manifest()
 	preManifest, warnings, err := imgType.Manifest(bp, *imgOpts, repos, mg.customSeed)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if len(warnings) > 0 {
 		warn := strings.Join(warnings, "\n")
 		if mg.warningsOutput != nil {
 			fmt.Fprint(mg.warningsOutput, warn)
 		} else {
-			return nil, fmt.Errorf("Warnings during manifest creation:\n%v", warn)
+			return Result{}, fmt.Errorf("Warnings during manifest creation:\n%v", warn)
 		}
 	}
 	pkgSetChains, err := preManifest.GetPackageSetChains()
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	solver := depsolvednf.NewSolver(dist.ModulePlatformID(), dist.Releasever(), a.Name(), dist.Name(), mg.cacheDir)
 	if dd, ok := dist.(distro.CustomDepsolverDistro); ok {
@@ -204,7 +217,7 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 		archi := common.Must(arch.FromString(a.Name()))
 		customSolver, cleanupFunc, err := dd.Depsolver(mg.cacheDir, archi)
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		if customSolver != nil {
 			solver = customSolver
@@ -217,28 +230,28 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 	}
 	depsolved, err := mg.depsolve(solver, mg.cacheDir, mg.depsolveWarningsOutput, pkgSetChains, dist, a.Name())
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	containerSpecs, err := mg.containerResolver(preManifest.GetContainerSourceSpecs(), a.Name())
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	for _, specs := range containerSpecs {
 		for _, spec := range specs {
 			if spec.Arch.String() != a.Name() {
-				return nil, fmt.Errorf("%w: %q != %q", ErrContainerArchMismatch, spec.Arch, a.Name())
+				return Result{}, fmt.Errorf("%w: %q != %q", ErrContainerArchMismatch, spec.Arch, a.Name())
 			}
 		}
 	}
 
 	commitSpecs, err := mg.commitResolver(preManifest.GetOSTreeSourceSpecs())
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
 	flatpakSpecs, err := mg.flatpakResolver(preManifest.GetFlatpakSourceSpecs())
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
 	opts := &manifest.SerializeOptions{
@@ -247,14 +260,10 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 
 	mf, err := preManifest.Serialize(depsolved, containerSpecs, commitSpecs, flatpakSpecs, opts)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 
-	if mg.sbomWriter != nil || mg.rpmlistWriter != nil {
-		uniquePackages := make(map[string]rpmmd.Package)
-		// XXX: this is very similar to
-		// osbuild-composer:jobimpl-osbuild.go, see if code
-		// can be shared
+	if mg.sbomWriter != nil {
 		for plName, depsolvedPipeline := range depsolved {
 			pipelinePurpose := "unknown"
 			switch {
@@ -270,26 +279,69 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 				var buf bytes.Buffer
 				enc := json.NewEncoder(&buf)
 				if err := enc.Encode(depsolvedPipeline.SBOM.Document); err != nil {
-					return nil, err
+					return Result{}, err
 				}
 				if err := mg.sbomWriter(sbomDocOutputFilename, &buf, depsolvedPipeline.SBOM.DocType); err != nil {
-					return nil, err
+					return Result{}, err
 				}
-			}
-
-			if mg.rpmlistWriter != nil && pipelinePurpose == "image" {
-				addUniquePackagesFromPipeline(uniquePackages, depsolvedPipeline)
-			}
-		}
-
-		if mg.rpmlistWriter != nil {
-			if err := writeRPMList(mg.rpmlistWriter, uniquePackages); err != nil {
-				return nil, err
 			}
 		}
 	}
 
-	return mf, nil
+	// The rpmlist needs full depsolve records; the returned inventory must
+	// project away repository credentials and download URLs.
+	payload := preManifest.PayloadPipelines()
+	packages := payloadPackages(payload, depsolved)
+	if mg.rpmlistWriter != nil {
+		if err := writeRPMList(mg.rpmlistWriter, packages); err != nil {
+			return Result{}, err
+		}
+	}
+
+	return Result{Manifest: mf, Packages: sbomPackages(packages)}, nil
+}
+
+// payloadPackages returns the union of depsolved payload RPMs (including
+// extras), sorted by full NEVRA. Buildroot pipelines are excluded.
+// A package recorded twice with the same checksum is
+// kept once.
+//
+// The returned records are the full depsolve packages. Callers that persist
+// them (the SBOM sidecar) must project onto sbom.Package instead.
+func payloadPackages(payload []string, depsolved map[string]depsolvednf.DepsolveResult) rpmmd.PackageList {
+	unique := make(map[string]rpmmd.Package)
+	// XXX: this is very similar to
+	// osbuild-composer:jobimpl-osbuild.go, see if code
+	// can be shared
+	for plName, pipeline := range depsolved {
+		if !slices.Contains(payload, plName) {
+			continue
+		}
+		addUniquePackagesFromPipeline(unique, pipeline)
+	}
+	packages := make(rpmmd.PackageList, 0, len(unique))
+	for _, pkg := range unique {
+		packages = append(packages, pkg)
+	}
+	// The packages were collected from a map keyed by pipeline name, so their
+	// order is otherwise random. Sort them so sidecars and SBOMs are stable.
+	slices.SortFunc(packages, func(a, b rpmmd.Package) int {
+		return cmp.Or(
+			cmp.Compare(a.FullNEVRA(), b.FullNEVRA()),
+			cmp.Compare(a.Checksum.Value, b.Checksum.Value),
+		)
+	})
+	return packages
+}
+
+// sbomPackages copies only the fields an SBOM needs. Repository credentials,
+// client-certificate paths, and download URLs on the depsolve records are dropped.
+func sbomPackages(packages rpmmd.PackageList) []sbom.Package {
+	out := make([]sbom.Package, len(packages))
+	for i, pkg := range packages {
+		out[i] = sbom.PackageFromRPMMD(pkg)
+	}
+	return out
 }
 
 func addUniquePackagesFromPipeline(unique map[string]rpmmd.Package, pipeline depsolvednf.DepsolveResult) {
@@ -305,11 +357,7 @@ func addUniquePackagesFromPipeline(unique map[string]rpmmd.Package, pipeline dep
 	}
 }
 
-func writeRPMList(writer RPMListWriterFunc, unique map[string]rpmmd.Package) error {
-	var packages rpmmd.PackageList
-	for _, pkg := range unique {
-		packages = append(packages, pkg)
-	}
+func writeRPMList(writer RPMListWriterFunc, packages rpmmd.PackageList) error {
 	rpmListJSON, err := rpmlist.EncodePackages(packages)
 	if err != nil {
 		return err

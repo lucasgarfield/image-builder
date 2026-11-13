@@ -60,10 +60,10 @@ func TestManifestGeneratorDepsolve(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, mg)
 			var bp blueprint.Blueprint
-			osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, nil)
+			result, err := mg.Generate(&bp, res[0].ImgType, nil)
 			require.NoError(t, err)
 
-			pipelineNames, err := manifesttest.PipelineNamesFrom(osbuildManifest)
+			pipelineNames, err := manifesttest.PipelineNamesFrom(result.Manifest)
 			assert.NoError(t, err)
 			assert.Equal(t, []string{"build", "os", "image", "qcow2"}, pipelineNames)
 
@@ -73,15 +73,15 @@ func TestManifestGeneratorDepsolve(t *testing.T) {
 				// Format: "sources":{... "org.osbuild.librepo":{... "items":{... "sha256:...":{"path":"packages/...","mirror":"..."}}}
 				sourcesPattern := regexp.MustCompile(
 					`"sources":\{"org\.osbuild\.librepo":\{"items":\{"sha256:[a-f0-9]{64}":\{"path":"packages/[^"]+\.rpm","mirror":"[^"]+"\}`)
-				assert.Regexp(t, sourcesPattern, string(osbuildManifest))
-				assert.NotContains(t, string(osbuildManifest), "org.osbuild.curl")
+				assert.Regexp(t, sourcesPattern, string(result.Manifest))
+				assert.NotContains(t, string(result.Manifest), "org.osbuild.curl")
 			} else {
 				// Curl uses RemoteLocations for URL
 				// Format: "sources":{... "org.osbuild.curl":{... "items":{... "sha256:...":{"url":"https://..."}}}
 				sourcesPattern := regexp.MustCompile(
 					`"sources":\{"org\.osbuild\.curl":\{"items":\{"sha256:[a-f0-9]{64}":\{"url":"https://[^"]+/packages/[^"]+\.rpm"\}`)
-				assert.Regexp(t, sourcesPattern, string(osbuildManifest))
-				assert.NotContains(t, string(osbuildManifest), "org.osbuild.librepo")
+				assert.Regexp(t, sourcesPattern, string(result.Manifest))
+				assert.NotContains(t, string(result.Manifest), "org.osbuild.librepo")
 			}
 		})
 	}
@@ -113,19 +113,19 @@ func TestManifestGeneratorWithOstreeCommit(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, mg)
 	var bp blueprint.Blueprint
-	osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, imageOpts)
+	result, err := mg.Generate(&bp, res[0].ImgType, imageOpts)
 	assert.NoError(t, err)
 
-	pipelineNames, err := manifesttest.PipelineNamesFrom(osbuildManifest)
+	pipelineNames, err := manifesttest.PipelineNamesFrom(result.Manifest)
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"build", "ostree-deployment", "image"}, pipelineNames)
 
 	// XXX: add testhelper to manifesttest for this
-	assert.Contains(t, string(osbuildManifest), `{"url":"resolved-url-for-centos/9/x86_64/edge"}`)
+	assert.Contains(t, string(result.Manifest), `{"url":"resolved-url-for-centos/9/x86_64/edge"}`)
 	// Test that depsolving happened by checking that sources contain curl items with sha256 checksums and URLs
 	sourcesPattern := regexp.MustCompile(
 		`"sources":\{"org\.osbuild\.curl":\{"items":\{"sha256:[a-f0-9]{64}":\{"url":"https://[^"]+/packages/[^"]+\.rpm"\}`)
-	assert.Regexp(t, sourcesPattern, string(osbuildManifest))
+	assert.Regexp(t, sourcesPattern, string(result.Manifest))
 }
 
 func fakeDepsolve(solver *depsolvednf.Solver, cacheDir string, depsolveWarningsOutput io.Writer, packageSets map[string][]rpmmd.PackageSet, d distro.Distro, arch string) (map[string]depsolvednf.DepsolveResult, error) {
@@ -212,11 +212,11 @@ func TestManifestGeneratorContainers(t *testing.T) {
 			},
 		},
 	}
-	osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, nil)
+	result, err := mg.Generate(&bp, res[0].ImgType, nil)
 	assert.NoError(t, err)
 
 	// container is included
-	assert.Contains(t, string(osbuildManifest), "resolved-cnt-"+fakeContainerSource)
+	assert.Contains(t, string(result.Manifest), "resolved-cnt-"+fakeContainerSource)
 }
 
 func TestManifestGeneratorDepsolveWithSbomWriter(t *testing.T) {
@@ -298,6 +298,185 @@ func TestManifestGeneratorWithRPMListWriter(t *testing.T) {
 	assert.NotEmpty(t, rows)
 }
 
+// Payload RPMs include all installation transactions. Buildroot-only RPMs
+// are excluded and packages shared between pipelines are deduplicated.
+func TestGenerateReturnsPayloadPackages(t *testing.T) {
+	repos, err := testrepos.New()
+	require.NoError(t, err)
+	fac := distrofactory.NewDefault()
+
+	filter, err := imagefilter.New(fac, repos)
+	require.NoError(t, err)
+	res, err := filter.Filter("distro:centos-9", "type:qcow2", "arch:x86_64")
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+
+	imgType := res[0].ImgType
+	a := imgType.Arch()
+	imgRepos, err := repos.ReposByImageTypeName(a.Distro().Name(), a.Name(), imgType.Name())
+	require.NoError(t, err)
+
+	repo := imgRepos[0]
+	fixtureRPM := func(name, digest string) rpmmd.Package {
+		return rpmmd.Package{
+			Name: name, Version: "1.0", Release: "1.fixture", Arch: "x86_64",
+			Vendor: "Fixture Vendor", URL: "https://example.test/" + name,
+			Checksum: rpmmd.Checksum{Type: "sha256", Value: strings.Repeat(digest, 64)},
+			RepoID:   repo.Id, Repo: &repo, Location: "packages/" + name + ".rpm",
+			RemoteLocations: []string{repo.BaseURLs[0] + "/packages/" + name + ".rpm"},
+		}
+	}
+	payloadOnly := fixtureRPM("payload-only", "a")
+	buildrootOnly := fixtureRPM("buildroot-only", "b")
+	both := fixtureRPM("both", "c")
+	both.Epoch = 2
+	kernel := fixtureRPM("kernel", "d")
+
+	controlledDepsolve := func(_ *depsolvednf.Solver, _ string, _ io.Writer, _ map[string][]rpmmd.PackageSet, _ distro.Distro, _ string) (map[string]depsolvednf.DepsolveResult, error) {
+		return map[string]depsolvednf.DepsolveResult{
+			// Payload pipelines of distro:centos-9 type:qcow2.
+			"os":    {Transactions: depsolvednf.TransactionList{{both, kernel}, {payloadOnly}}},
+			"image": {Transactions: depsolvednf.TransactionList{{both}}},
+			// The buildroot is host tooling, not image content.
+			"build": {Transactions: depsolvednf.TransactionList{{buildrootOnly, both}}},
+		}, nil
+	}
+
+	var bp blueprint.Blueprint
+	mg, err := manifestgen.New(repos, &manifestgen.Options{
+		Depsolve:          controlledDepsolve,
+		CommitResolver:    panicCommitResolver,
+		ContainerResolver: panicContainerResolver,
+	})
+	require.NoError(t, err)
+
+	result, err := mg.Generate(&bp, imgType, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Manifest)
+
+	// Explicit order checks the stable FullNEVRA sort, independent of map order.
+	want := []sbom.Package{
+		{Name: "both", Epoch: 2, Version: "1.0", Release: "1.fixture", Arch: "x86_64",
+			Vendor: "Fixture Vendor", URL: "https://example.test/both",
+			Checksum: rpmmd.Checksum{Type: "sha256", Value: strings.Repeat("c", 64)}},
+		{Name: "kernel", Version: "1.0", Release: "1.fixture", Arch: "x86_64",
+			Vendor: "Fixture Vendor", URL: "https://example.test/kernel",
+			Checksum: rpmmd.Checksum{Type: "sha256", Value: strings.Repeat("d", 64)}},
+		{Name: "payload-only", Version: "1.0", Release: "1.fixture", Arch: "x86_64",
+			Vendor: "Fixture Vendor", URL: "https://example.test/payload-only",
+			Checksum: rpmmd.Checksum{Type: "sha256", Value: strings.Repeat("a", 64)}},
+	}
+	assert.Equal(t, want, result.Packages)
+	for range 5 {
+		again, err := mg.Generate(&bp, imgType, nil)
+		require.NoError(t, err)
+		assert.Equal(t, want, again.Packages)
+	}
+}
+
+// The persisted RPM inventory must omit repository credentials, client-
+// certificate paths, download URLs, and unrelated depsolve fields.
+func TestGeneratePackagesOmitRPMSecrets(t *testing.T) {
+	repos, err := testrepos.New()
+	require.NoError(t, err)
+	fac := distrofactory.NewDefault()
+
+	filter, err := imagefilter.New(fac, repos)
+	require.NoError(t, err)
+	res, err := filter.Filter("distro:centos-9", "type:qcow2", "arch:x86_64")
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+
+	const (
+		repoUser      = "repo-user-secret"
+		repoPassword  = "repo-password-secret"
+		sslCACert     = "/etc/pki/entitlement/secret-ca.pem"
+		sslClientKey  = "/etc/pki/entitlement/secret-key.pem"
+		sslClientCert = "/etc/pki/entitlement/secret-cert.pem"
+		downloadURL   = "https://cdn.example.test/secret-user:secret-password@packages/secret.rpm"
+		secrets       = "org.osbuild.mtls"
+	)
+	depsolveWithSecrets := func(solver *depsolvednf.Solver, cacheDir string, depsolveWarningsOutput io.Writer, packageSets map[string][]rpmmd.PackageSet, d distro.Distro, arch string) (map[string]depsolvednf.DepsolveResult, error) {
+		depsolved, err := fakeDepsolve(solver, cacheDir, depsolveWarningsOutput, packageSets, d, arch)
+		if err != nil {
+			return nil, err
+		}
+		for name, result := range depsolved {
+			for ti := range result.Transactions {
+				for pi := range result.Transactions[ti] {
+					pkg := &result.Transactions[ti][pi]
+					// Keep the repo the mock already depsolved against so GPG
+					// checking still has keys, and stamp the credentials the
+					// worker attaches during a real depsolve.
+					repo := rpmmd.RepoConfig{Id: "secret-baseos"}
+					if pkg.Repo != nil {
+						repo = *pkg.Repo
+					}
+					repo.Username = repoUser
+					repo.Password = repoPassword
+					repo.SSLCACert = sslCACert
+					repo.SSLClientKey = sslClientKey
+					repo.SSLClientCert = sslClientCert
+					pkg.Repo = &repo
+					pkg.Secrets = secrets
+					pkg.RemoteLocations = []string{downloadURL}
+					pkg.HeaderChecksum = rpmmd.Checksum{Type: "sha256", Value: strings.Repeat("f", 64)}
+					pkg.Files = []string{"/usr/bin/secret"}
+				}
+			}
+			depsolved[name] = result
+		}
+		return depsolved, nil
+	}
+
+	mg, err := manifestgen.New(repos, &manifestgen.Options{
+		Depsolve:          depsolveWithSecrets,
+		CommitResolver:    panicCommitResolver,
+		ContainerResolver: panicContainerResolver,
+	})
+	require.NoError(t, err)
+
+	var bp blueprint.Blueprint
+	result, err := mg.Generate(&bp, res[0].ImgType, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Packages)
+
+	encoded, err := json.Marshal(result.Packages)
+	require.NoError(t, err)
+	raw := string(encoded)
+	for _, secret := range []string{
+		repoUser,
+		repoPassword,
+		sslCACert,
+		sslClientKey,
+		sslClientCert,
+		downloadURL,
+		secrets,
+		strings.Repeat("f", 64),
+		"/usr/bin/secret",
+	} {
+		assert.NotContains(t, raw, secret)
+	}
+	// These keys would indicate the full rpmmd record had leaked.
+	for _, key := range []string{
+		"\"Repo\"",
+		"\"Secrets\"",
+		"\"RemoteLocations\"",
+		"\"Username\"",
+		"\"Password\"",
+		"\"SSLClientKey\"",
+		"\"SSLClientCert\"",
+		"\"SSLCACert\"",
+	} {
+		assert.NotContains(t, raw, key)
+	}
+
+	for _, pkg := range result.Packages {
+		assert.NotEmpty(t, pkg.Name)
+		assert.NotEmpty(t, pkg.Checksum.Value)
+	}
+}
+
 func TestManifestGeneratorSeed(t *testing.T) {
 	repos, err := testrepos.New()
 	assert.NoError(t, err)
@@ -322,16 +501,16 @@ func TestManifestGeneratorSeed(t *testing.T) {
 		assert.NoError(t, err)
 
 		var bp blueprint.Blueprint
-		osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, nil)
+		result, err := mg.Generate(&bp, res[0].ImgType, nil)
 		assert.NoError(t, err)
 
 		// with the customSeed we always get a predicatable uuid for
 		// the xfs boot partition
 		needle := `8b9968ba-f910-4259-915b-f7025a291b00`
 		if withCustomSeed {
-			assert.Contains(t, string(osbuildManifest), needle)
+			assert.Contains(t, string(result.Manifest), needle)
 		} else {
-			assert.NotContains(t, string(osbuildManifest), needle)
+			assert.NotContains(t, string(result.Manifest), needle)
 		}
 	}
 }
@@ -392,12 +571,12 @@ func TestManifestGeneratorOverrideRepos(t *testing.T) {
 			assert.NoError(t, err)
 
 			var bp blueprint.Blueprint
-			osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, nil)
+			result, err := mg.Generate(&bp, res[0].ImgType, nil)
 			assert.NoError(t, err)
 			if withOverrideRepos {
-				assert.Contains(t, string(osbuildManifest), "http://example.com/overriden-repo/")
+				assert.Contains(t, string(result.Manifest), "http://example.com/overriden-repo/")
 			} else {
-				assert.NotContains(t, string(osbuildManifest), "http://example.com/overriden-repo/")
+				assert.NotContains(t, string(result.Manifest), "http://example.com/overriden-repo/")
 			}
 		})
 	}
@@ -426,9 +605,9 @@ func TestManifestGeneratorUseBootstrapContainer(t *testing.T) {
 			assert.NoError(t, err)
 
 			var bp blueprint.Blueprint
-			osbuildManifest, err := mg.Generate(&bp, res[0].ImgType, nil)
+			result, err := mg.Generate(&bp, res[0].ImgType, nil)
 			assert.NoError(t, err)
-			pipelines, err := manifesttest.PipelineNamesFrom(osbuildManifest)
+			pipelines, err := manifesttest.PipelineNamesFrom(result.Manifest)
 			assert.NoError(t, err)
 			needle := "bootstrap-buildroot"
 			if useBootstrapContainer {
