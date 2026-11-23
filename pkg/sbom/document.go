@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,9 +16,6 @@ type Creator struct {
 	Version string
 }
 
-// Package describes a package included in the document.
-type Package struct{}
-
 // Inputs holds the information used to generate a document.
 type Inputs struct {
 	Creator  Creator
@@ -26,17 +24,19 @@ type Inputs struct {
 
 // Document is an in-memory software bill of materials.
 type Document struct {
-	creator Creator
-	id      uuid.UUID
-	created time.Time
+	creator  Creator
+	packages []Package
+	id       uuid.UUID
+	created  time.Time
 }
 
 // Generate builds a new document from the supplied inputs.
 func Generate(in Inputs) *Document {
 	return &Document{
-		creator: in.Creator,
-		id:      uuid.New(),
-		created: time.Now().UTC(),
+		creator:  in.Creator,
+		packages: slices.Clone(in.Packages),
+		id:       uuid.New(),
+		created:  time.Now().UTC(),
 	}
 }
 
@@ -51,14 +51,21 @@ type creationInfo struct {
 	Creators []string `json:"creators"`
 }
 
+type spdxRelationship struct {
+	ElementID      string `json:"spdxElementId"`
+	Type           string `json:"relationshipType"`
+	RelatedElement string `json:"relatedSpdxElement"`
+}
+
 type spdxDocument struct {
-	SPDXID            string       `json:"SPDXID"`
-	CreationInfo      creationInfo `json:"creationInfo"`
-	DataLicense       string       `json:"dataLicense"`
-	Name              string       `json:"name"`
-	SPDXVersion       string       `json:"spdxVersion"`
-	DocumentNamespace string       `json:"documentNamespace"`
-	Packages          []Package    `json:"packages"`
+	SPDXID            string             `json:"SPDXID"`
+	CreationInfo      creationInfo       `json:"creationInfo"`
+	DataLicense       string             `json:"dataLicense"`
+	Name              string             `json:"name"`
+	SPDXVersion       string             `json:"spdxVersion"`
+	DocumentNamespace string             `json:"documentNamespace"`
+	Packages          []spdxPackage      `json:"packages"`
+	Relationships     []spdxRelationship `json:"relationships,omitempty"`
 }
 
 // Write encodes the document as JSON in the selected format.
@@ -68,7 +75,7 @@ func (d *Document) Write(w io.Writer, format Format) error {
 	}
 	tool := d.creator.Name + "-" + d.creator.Version
 	name := "sbom-by-" + tool
-	return json.NewEncoder(w).Encode(spdxDocument{
+	doc := spdxDocument{
 		SPDXID: "SPDXRef-DOCUMENT",
 		CreationInfo: creationInfo{
 			Created:  d.created.Format(time.RFC3339),
@@ -78,6 +85,21 @@ func (d *Document) Write(w io.Writer, format Format) error {
 		Name:              name,
 		SPDXVersion:       "SPDX-2.3",
 		DocumentNamespace: "https://osbuild.org/spdxdocs/" + name + "-" + d.id.String(),
-		Packages:          []Package{},
-	})
+		Packages:          make([]spdxPackage, 0, len(d.packages)),
+	}
+	seen := make(map[string]bool, len(d.packages))
+	for _, pkg := range d.packages {
+		id := pkg.spdxID()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		doc.Packages = append(doc.Packages, pkg.toSPDX(id))
+		doc.Relationships = append(doc.Relationships, spdxRelationship{
+			ElementID:      doc.SPDXID,
+			Type:           "DESCRIBES",
+			RelatedElement: id,
+		})
+	}
+	return json.NewEncoder(w).Encode(doc)
 }

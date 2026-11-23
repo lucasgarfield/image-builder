@@ -277,7 +277,8 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 				sbomDocOutputFilename := fmt.Sprintf("%s.%s-%s.%s", imageName, pipelinePurpose, plName, defaultSBOMExt)
 				var buf bytes.Buffer
 				doc := sbom.Generate(sbom.Inputs{
-					Creator: *mg.sbomCreator,
+					Creator:  *mg.sbomCreator,
+					Packages: sbomPackages(depsolvedPipeline.Transactions),
 				})
 				if err := doc.Write(&buf, defaultSBOMFormat); err != nil {
 					return nil, err
@@ -300,6 +301,32 @@ func (mg *Generator) Generate(bp *blueprint.Blueprint, imgType distro.ImageType,
 	}
 
 	return mf, nil
+}
+
+func sbomPackages(transactions depsolvednf.TransactionList) []sbom.Package {
+	var packages []sbom.Package
+	for _, transaction := range transactions {
+		for _, rpm := range transaction {
+			pkg := sbom.Package{
+				Name:        rpm.Name,
+				Epoch:       rpm.Epoch,
+				Version:     rpm.Version,
+				Release:     rpm.Release,
+				Arch:        rpm.Arch,
+				Vendor:      rpm.Vendor,
+				Homepage:    rpm.URL,
+				SourceRPM:   rpm.SourceRpm,
+				Summary:     rpm.Summary,
+				Description: rpm.Description,
+				BuildTime:   rpm.BuildTime,
+			}
+			if len(rpm.RemoteLocations) > 0 {
+				pkg.DownloadURL = rpm.RemoteLocations[0]
+			}
+			packages = append(packages, pkg)
+		}
+	}
+	return packages
 }
 
 func addUniquePackagesFromPipeline(unique map[string]rpmmd.Package, pipeline depsolvednf.DepsolveResult) {

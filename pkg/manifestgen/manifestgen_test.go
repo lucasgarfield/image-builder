@@ -287,15 +287,27 @@ func TestManifestGeneratorDepsolveWithSbomWriter(t *testing.T) {
 	_, err = mg.Generate(&bp, res[0].ImgType, nil)
 	require.NoError(t, err)
 
-	assert.Contains(t, generatedSboms, "centos-9-qcow2-x86_64.buildroot-build.spdx.json")
-	assert.Contains(t, generatedSboms, "centos-9-qcow2-x86_64.image-os.spdx.json")
 	assert.Len(t, generatedSboms, 2)
-	for _, data := range generatedSboms {
+	for filename, pipeline := range map[string]string{
+		"centos-9-qcow2-x86_64.buildroot-build.spdx.json": "build",
+		"centos-9-qcow2-x86_64.image-os.spdx.json":        "os",
+	} {
+		data, ok := generatedSboms[filename]
+		require.True(t, ok, "missing %s", filename)
 		var doc struct {
 			SpdxVersion  string
 			CreationInfo struct{ Creators []string }
+			Packages     []struct{ Name string }
 		}
 		require.NoError(t, json.Unmarshal([]byte(data), &doc))
+		foundMarker := false
+		for _, pkg := range doc.Packages {
+			if strings.HasPrefix(pkg.Name, "pkgset:") {
+				foundMarker = true
+				assert.True(t, strings.HasPrefix(pkg.Name, "pkgset:"+pipeline+"_"), pkg.Name)
+			}
+		}
+		require.True(t, foundMarker, "missing package for pipeline %s", pipeline)
 		assert.Equal(t, "SPDX-2.3", doc.SpdxVersion)
 		assert.Equal(t, []string{"Tool: test-42"}, doc.CreationInfo.Creators)
 	}
