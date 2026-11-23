@@ -1,86 +1,49 @@
 package sbom
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestStandardTypeJSONUnmarhsall(t *testing.T) {
-	type testStruct struct {
-		Type     StandardType `json:"type"`
-		TypeOmit StandardType `json:"type_omit,omitempty"`
-	}
-
-	tests := []struct {
-		name string
-		data []byte
-		want testStruct
-	}{
-		{
-			name: "StandardTypeNone",
-			data: []byte(`{"type":""}`),
-			want: testStruct{
-				Type:     StandardTypeNone,
-				TypeOmit: StandardTypeNone,
-			},
+func TestLegacySPDX(t *testing.T) {
+	doc := Generate(Inputs{
+		Creator: Creator{
+			Name:    "image-builder",
+			Version: "1.2",
 		},
-		{
-			name: "StandardTypeSpdx",
-			data: []byte(`{"type":"spdx","type_omit":"spdx"}`),
-			want: testStruct{
-				Type:     StandardTypeSpdx,
-				TypeOmit: StandardTypeSpdx,
-			},
-		},
+	})
+	var buf bytes.Buffer
+	require.NoError(t, doc.Write(&buf, FormatLegacyOSBuildSPDX))
+	var got struct {
+		SPDXVersion       string
+		DataLicense       string
+		SPDXID            string
+		Name              string
+		DocumentNamespace string
+		CreationInfo      struct {
+			Created  string
+			Creators []string
+		}
+		Packages []json.RawMessage
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var ts testStruct
-			err := json.Unmarshal(tt.data, &ts)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.want, ts)
-		})
-	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Equal(t, "SPDX-2.3", got.SPDXVersion)
+	require.Equal(t, "CC0-1.0", got.DataLicense)
+	require.Equal(t, "SPDXRef-DOCUMENT", got.SPDXID)
+	require.Equal(t, "sbom-by-image-builder-1.2", got.Name)
+	require.Regexp(t, `^https://osbuild\.org/spdxdocs/sbom-by-image-builder-1\.2-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, got.DocumentNamespace)
+	created, err := time.Parse(time.RFC3339, got.CreationInfo.Created)
+	require.NoError(t, err)
+	require.Equal(t, created.UTC().Format(time.RFC3339), got.CreationInfo.Created)
+	require.Equal(t, []string{"Tool: image-builder-1.2"}, got.CreationInfo.Creators)
+	require.Equal(t, []json.RawMessage{}, got.Packages)
 }
 
-func TestStandardTypeJSONMarhsall(t *testing.T) {
-	type TestStruct struct {
-		Type     StandardType `json:"type"`
-		TypeOmit StandardType `json:"type_omit,omitempty"`
-	}
-
-	tests := []struct {
-		name string
-		want []byte
-		data TestStruct
-	}{
-		{
-			name: "StandardTypeNone",
-			want: []byte(`{"type":""}`),
-			data: TestStruct{
-				Type:     StandardTypeNone,
-				TypeOmit: StandardTypeNone,
-			},
-		},
-		{
-			name: "StandardTypeSpdx",
-			want: []byte(`{"type":"spdx","type_omit":"spdx"}`),
-			data: TestStruct{
-				Type:     StandardTypeSpdx,
-				TypeOmit: StandardTypeSpdx,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got []byte
-			got, err := json.Marshal(tt.data)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+func TestUnknownFormat(t *testing.T) {
+	require.Error(t, Generate(Inputs{}).Write(io.Discard, Format("unknown")))
 }

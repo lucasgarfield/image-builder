@@ -692,6 +692,10 @@ func generateManifest(pbar progress.ProgressBar, cmd *cobra.Command, args []stri
 	}
 
 	if withSBOM {
+		mgOptions.SBOMCreator = &sbom.Creator{
+			Name:    "image-builder",
+			Version: version,
+		}
 		mgOptions.SBOMWriter = initSBOMWriter(imgBasename, imgOutputDir)
 	}
 
@@ -1374,7 +1378,7 @@ func checkTaskVersion(task taskInfo) error {
 }
 
 func initSBOMWriter(sbomBasename string, sbomDir string) manifestgen.SBOMWriterFunc {
-	return func(filename string, content io.Reader, docType sbom.StandardType) error {
+	return func(filename string, content io.Reader, format sbom.Format) error {
 		filename = fmt.Sprintf("%s.%s", sbomBasename, strings.SplitN(filename, ".", 2)[1])
 		return fileWriter(sbomDir, filename, content)
 	}

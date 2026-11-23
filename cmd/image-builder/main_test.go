@@ -845,7 +845,19 @@ func TestManifestIntegrationWithSBOMWithOutputDir(t *testing.T) {
 
 	sboms, err := filepath.Glob(filepath.Join(outputDir, "*.spdx.json"))
 	assert.NoError(t, err)
-	assert.Equal(t, len(sboms), 2)
+	require.Len(t, sboms, 2)
+	for _, filename := range sboms {
+		data, err := os.ReadFile(filename)
+		require.NoError(t, err)
+		var doc struct {
+			SpdxVersion  string
+			CreationInfo struct{ Creators []string }
+		}
+		require.NoError(t, json.Unmarshal(data, &doc))
+		assert.Equal(t, "SPDX-2.3", doc.SpdxVersion)
+		require.Len(t, doc.CreationInfo.Creators, 1)
+		assert.Regexp(t, `^Tool: image-builder-.+$`, doc.CreationInfo.Creators[0])
+	}
 	assert.Equal(t, filepath.Join(outputDir, "centos-9-qcow2-x86_64.buildroot-build.spdx.json"), sboms[0])
 	assert.Equal(t, filepath.Join(outputDir, "centos-9-qcow2-x86_64.image-os.spdx.json"), sboms[1])
 }
@@ -1419,7 +1431,7 @@ func fakeDepsolve(solver *depsolvednf.Solver, cacheDir string, depsolveWarningsO
 	if depsolveWarningsOutput != nil {
 		_, _ = depsolveWarningsOutput.Write([]byte(`fake depsolve output`))
 	}
-	depsolvedSets, err := manifestmock.Depsolve(packageSets, arch, nil, true)
+	depsolvedSets, err := manifestmock.Depsolve(packageSets, arch, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -3,68 +3,81 @@ package sbom
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"time"
+
+	"github.com/google/uuid"
 )
 
-type StandardType uint64
-
-const (
-	StandardTypeNone StandardType = iota
-	StandardTypeSpdx
-)
-
-func (t StandardType) String() string {
-	switch t {
-	case StandardTypeNone:
-		return "none"
-	case StandardTypeSpdx:
-		return "spdx"
-	default:
-		panic("invalid standard type")
-	}
+// Creator identifies the tool that made the document.
+type Creator struct {
+	Name    string
+	Version string
 }
 
-func (t StandardType) MarshalJSON() ([]byte, error) {
-	var s string
+// Package describes a package included in the document.
+type Package struct{}
 
-	if t == StandardTypeNone {
-		s = ""
-	} else {
-		s = t.String()
-	}
-
-	return json.Marshal(s)
+// Inputs holds the information used to generate a document.
+type Inputs struct {
+	Creator  Creator
+	Packages []Package
 }
 
-func (t *StandardType) UnmarshalJSON(data []byte) error {
-	switch string(data) {
-	case `""`:
-		*t = StandardTypeNone
-	case `"spdx"`:
-		*t = StandardTypeSpdx
-	default:
-		return fmt.Errorf("invalid SBOM standard type: %s", data)
-	}
-	return nil
-}
-
+// Document is an in-memory software bill of materials.
 type Document struct {
-	// type of the document standard
-	DocType StandardType
-
-	// document in a specific standard JSON raw format
-	Document json.RawMessage
+	creator Creator
+	id      uuid.UUID
+	created time.Time
 }
 
-func NewDocument(docType StandardType, doc json.RawMessage) (*Document, error) {
-	switch docType {
-	case StandardTypeSpdx:
-		docType = StandardTypeSpdx
-	default:
-		return nil, fmt.Errorf("unsupported SBOM document type: %s", docType)
-	}
-
+// Generate builds a new document from the supplied inputs.
+func Generate(in Inputs) *Document {
 	return &Document{
-		DocType:  docType,
-		Document: doc,
-	}, nil
+		creator: in.Creator,
+		id:      uuid.New(),
+		created: time.Now().UTC(),
+	}
+}
+
+// Format selects the output representation of a document.
+type Format string
+
+// FormatLegacyOSBuildSPDX selects the SPDX 2.3 JSON format used by osbuild.
+const FormatLegacyOSBuildSPDX Format = "osbuild-spdx"
+
+type creationInfo struct {
+	Created  string   `json:"created"`
+	Creators []string `json:"creators"`
+}
+
+type spdxDocument struct {
+	SPDXID            string       `json:"SPDXID"`
+	CreationInfo      creationInfo `json:"creationInfo"`
+	DataLicense       string       `json:"dataLicense"`
+	Name              string       `json:"name"`
+	SPDXVersion       string       `json:"spdxVersion"`
+	DocumentNamespace string       `json:"documentNamespace"`
+	Packages          []Package    `json:"packages"`
+}
+
+// Write encodes the document as JSON in the selected format.
+func (d *Document) Write(w io.Writer, format Format) error {
+	if format != FormatLegacyOSBuildSPDX {
+		return fmt.Errorf("unknown SBOM format: %q", format)
+	}
+	tool := d.creator.Name + "-" + d.creator.Version
+	name := "sbom-by-" + tool
+	return json.NewEncoder(w).Encode(spdxDocument{
+		SPDXID: "SPDXRef-DOCUMENT",
+		CreationInfo: creationInfo{
+			Created:  d.created.Format(time.RFC3339),
+			Creators: []string{"Tool: " + tool},
+		},
+		DataLicense:       "CC0-1.0",
+		Name:              name,
+		SPDXVersion:       "SPDX-2.3",
+		DocumentNamespace: "https://osbuild.org/spdxdocs/" + name + "-" + d.id.String(),
+		Packages:          []Package{},
+	})
 }

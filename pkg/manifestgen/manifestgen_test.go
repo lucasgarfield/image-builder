@@ -132,7 +132,7 @@ func fakeDepsolve(solver *depsolvednf.Solver, cacheDir string, depsolveWarningsO
 	if depsolveWarningsOutput != nil {
 		_, _ = depsolveWarningsOutput.Write([]byte(`fake depsolve output`))
 	}
-	depsolvedSets, err := manifestmock.Depsolve(packageSets, arch, nil, true)
+	depsolvedSets, err := manifestmock.Depsolve(packageSets, arch, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +219,38 @@ func TestManifestGeneratorContainers(t *testing.T) {
 	assert.Contains(t, string(osbuildManifest), "resolved-cnt-"+fakeContainerSource)
 }
 
+func TestNewRejectsInvalidSBOMCreator(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		creator *sbom.Creator
+	}{
+		{
+			name:    "nil creator",
+			creator: nil,
+		},
+		{
+			name: "missing name",
+			creator: &sbom.Creator{
+				Version: "42",
+			},
+		},
+		{
+			name: "missing version",
+			creator: &sbom.Creator{
+				Name: "test",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := manifestgen.New(nil, &manifestgen.Options{
+				SBOMCreator: tc.creator,
+				SBOMWriter:  func(string, io.Reader, sbom.Format) error { return nil },
+			})
+			require.EqualError(t, err, "SBOM writer requires a creator with a name and version")
+		})
+	}
+}
+
 func TestManifestGeneratorDepsolveWithSbomWriter(t *testing.T) {
 	repos, err := testrepos.New()
 	assert.NoError(t, err)
@@ -236,8 +268,12 @@ func TestManifestGeneratorDepsolveWithSbomWriter(t *testing.T) {
 		CommitResolver:    panicCommitResolver,
 		ContainerResolver: panicContainerResolver,
 
-		SBOMWriter: func(filename string, content io.Reader, docType sbom.StandardType) error {
-			assert.Equal(t, sbom.StandardTypeSpdx, docType)
+		SBOMCreator: &sbom.Creator{
+			Name:    "test",
+			Version: "42",
+		},
+		SBOMWriter: func(filename string, content io.Reader, format sbom.Format) error {
+			assert.Equal(t, sbom.FormatLegacyOSBuildSPDX, format)
 
 			b, err := io.ReadAll(content)
 			assert.NoError(t, err)
@@ -246,19 +282,23 @@ func TestManifestGeneratorDepsolveWithSbomWriter(t *testing.T) {
 		},
 	}
 	mg, err := manifestgen.New(repos, opts)
-	assert.NoError(t, err)
-	assert.NotNil(t, mg)
+	require.NoError(t, err)
 	var bp blueprint.Blueprint
 	_, err = mg.Generate(&bp, res[0].ImgType, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, generatedSboms, "centos-9-qcow2-x86_64.buildroot-build.spdx.json")
 	assert.Contains(t, generatedSboms, "centos-9-qcow2-x86_64.image-os.spdx.json")
-	expected := map[string]string{
-		"centos-9-qcow2-x86_64.buildroot-build.spdx.json": `{"sbom-for":"build"}`,
-		"centos-9-qcow2-x86_64.image-os.spdx.json":        `{"sbom-for":"os"}`,
+	assert.Len(t, generatedSboms, 2)
+	for _, data := range generatedSboms {
+		var doc struct {
+			SpdxVersion  string
+			CreationInfo struct{ Creators []string }
+		}
+		require.NoError(t, json.Unmarshal([]byte(data), &doc))
+		assert.Equal(t, "SPDX-2.3", doc.SpdxVersion)
+		assert.Equal(t, []string{"Tool: test-42"}, doc.CreationInfo.Creators)
 	}
-	assert.Equal(t, expected, generatedSboms)
 }
 
 func TestManifestGeneratorWithRPMListWriter(t *testing.T) {
