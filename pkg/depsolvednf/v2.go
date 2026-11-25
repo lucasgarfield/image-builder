@@ -242,7 +242,7 @@ func (h *v2Handler) makeDepsolveRequest(cfg *solverConfig, pkgSets []rpmmd.Packa
 		}
 
 		for _, jobRepo := range pkgSet.Repositories {
-			transactions[dsIdx].RepoIDs = append(transactions[dsIdx].RepoIDs, jobRepo.Hash())
+			transactions[dsIdx].RepoIDs = append(transactions[dsIdx].RepoIDs, solverRepoID(jobRepo))
 		}
 	}
 
@@ -413,7 +413,7 @@ func (h *v2Handler) reposFromRPMMD(cfg *solverConfig, rpmRepos []rpmmd.RepoConfi
 	dnfRepos := make([]v2Repository, len(rpmRepos))
 	for idx, rr := range rpmRepos {
 		dr := v2Repository{
-			ID:             rr.Hash(),
+			ID:             solverRepoID(rr),
 			Name:           rr.Name,
 			BaseURLs:       slices.Clone(rr.BaseURLs),
 			Metalink:       rr.Metalink,

@@ -157,6 +157,7 @@ func TestSolverDepsolve(t *testing.T) {
 	reposDir := filepath.Join(rootDir, "etc", "yum.repos.d")
 	require.NoError(t, os.MkdirAll(reposDir, 0777))
 	s.WriteConfig(filepath.Join(reposDir, "test.repo"))
+	s.RepoConfig.Id = "configured-baseos"
 
 	testCases := map[string]testCase{
 		"flat": {
@@ -251,6 +252,11 @@ func TestSolverDepsolve(t *testing.T) {
 					}
 
 					h.assertDepsolveResult(t, pkgsets, *actualResult)
+					wantID := s.RepoConfig.Id
+					if tc.rootDir != "" {
+						wantID = s.RepoConfig.Name // The .repo section name is the ID.
+					}
+					assert.Equal(wantID, actualResult.Repos[0].CanonicalID)
 
 					// NOTE: The SBOM document is not stable due to UUIDs, so we need to take it from the result
 					if tc.sbomType != sbom.StandardTypeNone {
@@ -1085,6 +1091,78 @@ func TestHashRequest(t *testing.T) {
 			reqHash2 := hashRequest(reqData2)
 			assert.Equal(t, 64, len(reqHash2))
 			assert.NotEqual(t, reqHash, reqHash2)
+		})
+	}
+}
+
+func TestSolverPreservesCanonicalRepoIDs(t *testing.T) {
+	unnamed := rpmmd.RepoConfig{BaseURLs: []string{"https://example.test/repo"}}
+	named, alias := unnamed, unnamed
+	named.Id = "rhel-9-for-x86_64-baseos-rpms"
+	alias.Id = "alternate-baseos"
+	repos := []rpmmd.RepoConfig{unnamed, named, alias}
+
+	// The request IDs must be distinct even though the base URLs are equal.
+	keys := []string{solverRepoID(unnamed), solverRepoID(named), solverRepoID(alias)}
+	require.Len(t, collectRepos([]rpmmd.PackageSet{{Repositories: repos}}), 3)
+	assert.NotEqual(t, keys[0], keys[1])
+	assert.NotEqual(t, keys[1], keys[2])
+
+	keys = append(keys, "rootdir-baseos")
+	expected := []string{"", named.Id, alias.Id, "rootdir-baseos"}
+	replyRepos := make(map[string]v2Repository, len(keys))
+	var replyRPMs []v2Package
+	for i, key := range keys {
+		replyRepos[key] = v2Repository{ID: key}
+		replyRPMs = append(replyRPMs, v2Package{Name: fmt.Sprintf("rpm%d", i), RepoID: key})
+	}
+	for _, operation := range []string{"depsolve", "dump", "search"} {
+		t.Run(operation, func(t *testing.T) {
+			solver := newTestSolver(t)
+			var output any = v2PackageListResult{Repos: replyRepos, Packages: replyRPMs[:len(repos)]}
+			wantPackages := len(repos)
+			if operation == "depsolve" {
+				solver.SetRootDir(t.TempDir())
+				wantPackages++
+				output = v2DepsolveResult{Repos: replyRepos, Transactions: [][]v2Package{replyRPMs}}
+			}
+			response, err := json.Marshal(output)
+			require.NoError(t, err)
+			requestPath := filepath.Join(t.TempDir(), "request.json")
+			solver.SetDepsolveDNFPath("sh", "-ec", `cat > "$1"; printf '%s' "$2"`, "fake-solver", requestPath, string(response))
+
+			var packages rpmmd.PackageList
+			switch operation {
+			case "depsolve":
+				result, err := solver.Depsolve([]rpmmd.PackageSet{{Include: []string{"rpm0"}, Repositories: repos}}, sbom.StandardTypeNone)
+				require.NoError(t, err)
+				packages = result.Transactions[0]
+			case "dump":
+				packages, err = solver.FetchMetadata(repos)
+				require.NoError(t, err)
+			case "search":
+				packages, err = solver.SearchMetadata(repos, []string{"rpm*"})
+				require.NoError(t, err)
+			}
+			require.Len(t, packages, wantPackages)
+			for i, pkg := range packages {
+				require.NotNil(t, pkg.Repo)
+				assert.Equal(t, keys[i], pkg.RepoID)
+				assert.Equal(t, pkg.RepoID, pkg.Repo.Id)
+				assert.Equal(t, expected[i], pkg.Repo.CanonicalID)
+			}
+
+			data, err := os.ReadFile(requestPath)
+			require.NoError(t, err)
+			var request v2Request
+			require.NoError(t, json.Unmarshal(data, &request))
+			require.Len(t, request.Arguments.Repos, len(repos))
+			for i, repo := range request.Arguments.Repos {
+				assert.Equal(t, keys[i], repo.ID)
+			}
+			if operation == "depsolve" {
+				assert.Equal(t, keys[:len(repos)], request.Arguments.Transactions[0].RepoIDs)
+			}
 		})
 	}
 }

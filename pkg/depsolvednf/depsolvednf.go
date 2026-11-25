@@ -248,13 +248,23 @@ func hashRequest(data []byte) string {
 	return fmt.Sprintf("%x", h[:])
 }
 
+// solverRepoID keys solver requests and their cache entries. Named repositories
+// with otherwise equal configurations must not lose their distinct provenance.
+func solverRepoID(repo rpmmd.RepoConfig) string {
+	key := repo.Hash()
+	if repo.Id == "" {
+		return key
+	}
+	return hashRequest([]byte(key + "\n" + repo.Id))
+}
+
 // collectRepos extracts unique repos from package sets maintaining order
 func collectRepos(pkgSets []rpmmd.PackageSet) []rpmmd.RepoConfig {
 	seen := make(map[string]bool)
 	repos := make([]rpmmd.RepoConfig, 0)
 	for _, ps := range pkgSets {
 		for _, repo := range ps.Repositories {
-			id := repo.Hash()
+			id := solverRepoID(repo)
 			if !seen[id] {
 				seen[id] = true
 				repos = append(repos, repo)
@@ -305,7 +315,7 @@ func (s *Solver) Depsolve(pkgSets []rpmmd.PackageSet, sbomType sbom.StandardType
 	now := time.Now().Local()
 	for _, r := range allRepos {
 		// ignore errors
-		_ = s.cache.touchRepo(r.Hash(), now)
+		_ = s.cache.touchRepo(solverRepoID(r), now)
 	}
 	s.cache.updateInfo()
 
@@ -313,6 +323,8 @@ func (s *Solver) Depsolve(pkgSets []rpmmd.PackageSet, sbomType sbom.StandardType
 	if err != nil {
 		return nil, err
 	}
+
+	preserveRepoIDs(resultRaw.Repos, allRepos, cfg.rootDir != "")
 
 	// Apply RHSM secrets to packages in each transaction as well.
 	for _, transaction := range resultRaw.Transactions {
@@ -378,7 +390,7 @@ func (s *Solver) FetchMetadata(repos []rpmmd.RepoConfig) (rpmmd.PackageList, err
 	now := time.Now().Local()
 	for _, r := range repos {
 		// ignore errors
-		_ = s.cache.touchRepo(r.Hash(), now)
+		_ = s.cache.touchRepo(solverRepoID(r), now)
 	}
 	s.cache.updateInfo()
 
@@ -386,6 +398,8 @@ func (s *Solver) FetchMetadata(repos []rpmmd.RepoConfig) (rpmmd.PackageList, err
 	if err != nil {
 		return nil, err
 	}
+
+	preserveRepoIDs(res.Repos, repos, false)
 
 	// XXX: Cache and expose the whole operation result instead of just the packages in the future.
 
@@ -426,7 +440,7 @@ func (s *Solver) SearchMetadata(repos []rpmmd.RepoConfig, packages []string) (rp
 	now := time.Now().Local()
 	for _, r := range repos {
 		// ignore errors
-		_ = s.cache.touchRepo(r.Hash(), now)
+		_ = s.cache.touchRepo(solverRepoID(r), now)
 	}
 	s.cache.updateInfo()
 
@@ -434,6 +448,8 @@ func (s *Solver) SearchMetadata(repos []rpmmd.RepoConfig, packages []string) (rp
 	if err != nil {
 		return nil, err
 	}
+
+	preserveRepoIDs(res.Repos, repos, false)
 
 	// XXX: Cache and expose the whole operation result instead of just the packages in the future.
 
@@ -447,13 +463,31 @@ func (s *Solver) SearchMetadata(repos []rpmmd.RepoConfig, packages []string) (rp
 	return pkgs, nil
 }
 
+// preserveRepoIDs annotates resolved repositories without changing the solver
+// keys used by packages and sources. Package.Repo points into the result slice.
+func preserveRepoIDs(resolved, requested []rpmmd.RepoConfig, fromRootDir bool) {
+	ids := make(map[string]string, len(requested))
+	for _, repo := range requested {
+		ids[solverRepoID(repo)] = repo.Id
+	}
+	for i := range resolved {
+		repo := &resolved[i]
+		id, ok := ids[repo.Id]
+		if !ok && fromRootDir {
+			// Repositories loaded by the solver from .repo files already use their real IDs.
+			id = repo.Id
+		}
+		repo.CanonicalID = id
+	}
+}
+
 // applyRHSMSecrets overrides the Secrets field on packages from RHSM repos.
 // The activeHandler sets "org.osbuild.mtls" for repos with SSLClientKey,
 // but RHSM repos need "org.osbuild.rhsm" instead.
 func applyRHSMSecrets(pkgs rpmmd.PackageList, repos []rpmmd.RepoConfig) {
 	rhsmRepos := make(map[string]bool)
 	for _, repo := range repos {
-		rhsmRepos[repo.Hash()] = repo.RHSM
+		rhsmRepos[solverRepoID(repo)] = repo.RHSM
 	}
 	for i := range pkgs {
 		if rhsmRepos[pkgs[i].RepoID] {
@@ -484,12 +518,12 @@ func validatePackageSetRepoChain(pkgSets []rpmmd.PackageSet) error {
 	for dsIdx := 1; dsIdx < len(pkgSets); dsIdx++ {
 		prevRepoIDs := make([]string, len(pkgSets[dsIdx-1].Repositories))
 		for i, r := range pkgSets[dsIdx-1].Repositories {
-			prevRepoIDs[i] = r.Hash()
+			prevRepoIDs[i] = solverRepoID(r)
 		}
 
 		currRepoIDs := make([]string, len(pkgSets[dsIdx].Repositories))
 		for i, r := range pkgSets[dsIdx].Repositories {
-			currRepoIDs[i] = r.Hash()
+			currRepoIDs[i] = solverRepoID(r)
 		}
 
 		if len(currRepoIDs) < len(prevRepoIDs) {
@@ -577,7 +611,7 @@ func parseError(data []byte, repos []rpmmd.RepoConfig, cmdError error) Error {
 
 	// append to any instance of a repository ID the URL (or metalink, mirrorlist, etc)
 	for _, repo := range repos {
-		idstr := fmt.Sprintf("'%s'", repo.Hash())
+		idstr := fmt.Sprintf("'%s'", solverRepoID(repo))
 		var nameURL string
 		if len(repo.BaseURLs) > 0 {
 			nameURL = strings.Join(repo.BaseURLs, ",")

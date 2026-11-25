@@ -15,6 +15,7 @@ import (
 
 // Repository represents a repository entry in an on-disk repository file.
 type Repository struct {
+	Id             string   `json:"id,omitempty"`
 	Name           string   `json:"name"`
 	BaseURL        []string `json:"baseurl,omitempty"`
 	Metalink       string   `json:"metalink,omitempty"`
@@ -67,10 +68,12 @@ func (r *Repository) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 type RepoConfig struct {
-	// the repo id is not always required and is ignored in some cases.
-	// For example, it is not required in osbuild-depsolve-dnf, but it is a required
-	// field for creating a repo file in `/etc/yum.repos.d/`
-	Id             string   `json:"id,omitempty"`
+	// Id is the configured repository ID on input, or the solver lookup key
+	// on a resolved repository. It is required when writing a .repo file.
+	Id string `json:"id,omitempty"`
+	// CanonicalID is the original repository ID preserved in a solver result.
+	// It is empty when the repository has no configured ID.
+	CanonicalID    string   `json:"canonical_id,omitempty"`
 	Name           string   `json:"name,omitempty"`
 	BaseURLs       []string `json:"baseurls,omitempty"`
 	Metalink       string   `json:"metalink,omitempty"`
@@ -169,6 +172,7 @@ func (repo Repository) RepoConfig() RepoConfig {
 		keys = append(keys, repo.GPGKeys...)
 	}
 	return RepoConfig{
+		Id:             repo.Id,
 		Name:           repo.Name,
 		BaseURLs:       repo.BaseURL,
 		Metalink:       repo.Metalink,

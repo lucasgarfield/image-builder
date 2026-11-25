@@ -43,7 +43,6 @@ func parseRepoURLs(repoURLs []string, what string) ([]rpmmd.RepoConfig, error) {
 		// which is rich enough to contain gpg keys (and more).
 		checkGPG := false
 		repoConf = append(repoConf, rpmmd.RepoConfig{
-			Id:           fmt.Sprintf("%s-repo-%v", what, i),
 			Name:         fmt.Sprintf("%s repo#%v %s%s", what, i, baseURL.Host, baseURL.Path),
 			BaseURLs:     []string{baseURL.String()},
 			CheckGPG:     &checkGPG,

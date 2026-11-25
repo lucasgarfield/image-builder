@@ -21,14 +21,12 @@ func TestParseRepoURLsHappy(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []rpmmd.RepoConfig{
 		{
-			Id:           "forced-repo-0",
 			Name:         "forced repo#0 /path/to/repo",
 			BaseURLs:     []string{"file:///path/to/repo"},
 			CheckGPG:     &checkGPG,
 			CheckRepoGPG: &checkGPG,
 		},
 		{
-			Id:           "forced-repo-1",
 			Name:         "forced repo#1 example.com/repo",
 			BaseURLs:     []string{"https://example.com/repo"},
 			CheckGPG:     &checkGPG,
@@ -58,7 +56,8 @@ func TestNewRepoRegistryImplExtraReposGetAppended(t *testing.T) {
 	require.NoError(t, err)
 	repos, err := registry.DistroHasRepos("rhel-10.2", "x86_64")
 	require.NoError(t, err)
-	assert.Equal(t, repos[len(repos)-1].BaseURLs[0], "https://example.com/my/repo")
+	assert.Equal(t, "https://example.com/my/repo", repos[len(repos)-1].BaseURLs[0])
+	assert.Empty(t, repos[len(repos)-1].Id)
 }
 
 func TestNewRepoRegistryImplRepodir(t *testing.T) {

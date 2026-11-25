@@ -27,6 +27,11 @@ func TestRepoConfigUnmarshalHappy(t *testing.T) {
 		repo rpmmd.Repository
 	}{
 		{
+			name: "configured ID",
+			json: `{"id":"rhel-9-for-x86_64-baseos-rpms"}`,
+			repo: rpmmd.Repository{Id: "rhel-9-for-x86_64-baseos-rpms"},
+		},
+		{
 			name: "single-baseurl",
 			json: `{"baseurl":"http://example.com/repo"}`,
 			repo: rpmmd.Repository{BaseURL: []string{"http://example.com/repo"}},
@@ -62,9 +67,22 @@ func TestRepoConfigUnmarshalHappy(t *testing.T) {
 			configs, err := rpmmd.LoadRepositoriesFromReader(strings.NewReader(`{"aarch64":[` + tc.json + `]}`))
 			require.NoError(t, err)
 			require.Len(t, configs["aarch64"], 1)
+			assert.Equal(t, tc.repo.Id, configs["aarch64"][0].Id)
 			assert.Equal(t, tc.repo.IgnoreSSL, configs["aarch64"][0].IgnoreSSL)
 		})
 	}
+}
+
+func TestLoadRepositoriesPreservesConfiguredID(t *testing.T) {
+	configs, err := rpmmd.LoadRepositoriesFromReader(strings.NewReader(`
+x86_64:
+  - id: rhel-9-for-x86_64-baseos-rpms
+    name: RHEL 9 BaseOS
+    baseurl: https://repo.example.test/baseos/
+`))
+	require.NoError(t, err)
+	require.Len(t, configs["x86_64"], 1)
+	assert.Equal(t, "rhel-9-for-x86_64-baseos-rpms", configs["x86_64"][0].Id)
 }
 
 func TestRepoConfigUnmarshalSad(t *testing.T) {
