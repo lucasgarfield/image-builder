@@ -25,6 +25,9 @@ type BootcDiskImage struct {
 	UnifiedKernel bool
 	Aboot         bool
 
+	// Exports selects the formats requested by the image type. The manifest
+	// instantiates all conversions so consumers may choose a format at build time.
+	Exports    []string
 	Partitions []PartitionConfig
 
 	// Customizations
@@ -165,5 +168,19 @@ func (img *BootcDiskImage) InstantiateManifestFromContainers(m *manifest.Manifes
 	gcePipeline := newGCETarPipelineForImg(buildPipeline, rawImage, "gce")
 	gcePipeline.SetFilename("image.tar.gz")
 
+	formats := []manifest.FilePipeline{rawImage, qcow2Pipeline, vmdkPipeline, vhdPipeline, tarPipeline, gcePipeline}
+	for _, name := range img.Exports {
+		found := false
+		for _, p := range formats {
+			if p.Name() == name {
+				p.Export()
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown bootc disk export %q", name)
+		}
+	}
 	return nil
 }

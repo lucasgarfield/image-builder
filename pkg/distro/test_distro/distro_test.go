@@ -28,8 +28,7 @@ func TestTestDistroGetPipelines(t *testing.T) {
 				require.Equal(t, buildPipelines[0], "build")
 
 				payloadPipelines := m.PayloadPipelines()
-				require.Len(t, payloadPipelines, 1)
-				require.Equal(t, payloadPipelines[0], "os")
+				require.Equal(t, []string{"os", "assembler"}, payloadPipelines)
 			})
 		}
 	}

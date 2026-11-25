@@ -270,6 +270,7 @@ func (t *bootcImageType) manifestForDisk(bp *blueprint.Blueprint, options distro
 	filename := strings.Split(t.Filename(), ".")[0]
 
 	img := image.NewBootcDiskImage(platform, filename, containerSource, buildContainerSource)
+	img.Exports = t.Exports()
 	if opts := buildOptions(t); opts != nil {
 		img.BuildOptions = opts
 	}

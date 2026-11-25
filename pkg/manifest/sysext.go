@@ -69,6 +69,27 @@ func (p *SysextTree) serializeEnd() {
 	p.depsolveResult = nil
 }
 
+// installedTransactions excludes transactions already installed in the copied
+// reference tree. An empty final transaction means the extension adds no RPMs.
+func (p *SysextTree) installedTransactions(transactions depsolvednf.TransactionList) (depsolvednf.TransactionList, error) {
+	if p.depsolveReferencePipeline == nil {
+		return transactions, nil
+	}
+	chain, err := p.getPackageSetChain(p.Manifest().Distro)
+	if err != nil {
+		return nil, err
+	}
+	// A legacy worker may flatten all transactions into one. The extension
+	// delta cannot be recovered from that inventory. Do not install or report it.
+	if len(chain) > 0 && len(transactions) != len(chain) {
+		return nil, fmt.Errorf("pipeline %q: expected %d depsolve transactions, got %d", p.Name(), len(chain), len(transactions))
+	}
+	if len(transactions) > 0 {
+		return transactions[len(transactions)-1:], nil
+	}
+	return nil, nil
+}
+
 func (p *SysextTree) serialize() (osbuild.Pipeline, error) {
 	if p.depsolveResult == nil {
 		return osbuild.Pipeline{}, fmt.Errorf("serialization not started")
@@ -79,14 +100,12 @@ func (p *SysextTree) serialize() (osbuild.Pipeline, error) {
 		return osbuild.Pipeline{}, err
 	}
 
-	transactions := p.depsolveResult.Transactions
+	transactions, err := p.installedTransactions(p.depsolveResult.Transactions)
+	if err != nil {
+		return osbuild.Pipeline{}, err
+	}
 	baseRPMOptions := p.Customizations.BaseRPMOptions.Clone()
 	if ref := p.depsolveReferencePipeline; ref != nil {
-		// The reference transactions are already installed in the copied tree.
-		// The final transaction contains only the extension's additional packages.
-		if len(transactions) > 0 {
-			transactions = transactions[len(transactions)-1:]
-		}
 		pipeline.AddStage(osbuild.NewCopyStageSimple(
 			&osbuild.CopyStageOptions{Paths: []osbuild.CopyStagePath{{
 				From: "input://tree/",

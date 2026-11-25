@@ -50,7 +50,7 @@ func (p *VMDK) serialize() (osbuild.Pipeline, error) {
 		osbuild.NewQEMUStageOptions(p.Filename(), osbuild.QEMUFormatVMDK, osbuild.VMDKOptions{
 			Subformat: osbuild.VMDKSubformatStreamOptimized,
 		}),
-		osbuild.NewQemuStagePipelineFilesInputs(p.imgPipeline.Name(), p.imgPipeline.Export().Filename()),
+		osbuild.NewQemuStagePipelineFilesInputs(p.imgPipeline.Name(), p.imgPipeline.Filename()),
 	))
 
 	return pipeline, nil

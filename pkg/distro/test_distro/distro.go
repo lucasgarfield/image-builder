@@ -318,7 +318,8 @@ func (t *TestImageType) Manifest(b *blueprint.Blueprint, options distro.ImageOpt
 	m := &manifest.Manifest{}
 
 	build := manifest.NewContentTestBuild(m, buildPackages, nil, nil)
-	manifest.NewContentTest(osPkgsKey, build, osPackages, nil, ostreeSources)
+	payload := manifest.NewContentTest(osPkgsKey, build, osPackages, nil, ostreeSources)
+	manifest.NewTar(build, payload, t.Exports()[0]).Export()
 
 	return m, nil, nil
 }
