@@ -3,6 +3,8 @@ package sbom
 import (
 	"encoding/json"
 	"fmt"
+
+	pb "github.com/protobom/protobom/pkg/sbom"
 )
 
 type StandardType uint64
@@ -48,6 +50,9 @@ func (t *StandardType) UnmarshalJSON(data []byte) error {
 }
 
 type Document struct {
+	// doc is populated by Generate. The depsolver still returns the legacy JSON fields below.
+	doc *pb.Document
+
 	// type of the document standard
 	DocType StandardType
 
