@@ -17,24 +17,30 @@ podman_run = [
 def test_manifest_generates_sbom(tmp_path, build_container):
     output_dir = tmp_path / "output"
     output_dir.mkdir()
-    subprocess.check_call(podman_run + [
+    manifest = json.loads(subprocess.check_output(podman_run + [
         "-v", f"{output_dir}:/output",
-        build_container,
-        "manifest",
-        "minimal-raw",
-        "--distro", "centos-9",
+        build_container, "manifest", "minimal-raw", "--distro", "centos-9",
         "--with-sbom",
-    ], stdout=subprocess.DEVNULL)
-    arch = platform.machine()
-    fn = f"centos-9-minimal-raw-{arch}/centos-9-minimal-raw-{arch}.image-os.spdx.json"
-    image_sbom_json_path = output_dir / fn
-    assert image_sbom_json_path.exists()
-    fn = f"centos-9-minimal-raw-{arch}/centos-9-minimal-raw-{arch}.buildroot-build.spdx.json"
-    buildroot_sbom_json_path = output_dir / fn
-    assert buildroot_sbom_json_path.exists()
-    sbom_json = json.loads(image_sbom_json_path.read_text())
-    # smoke test that we have glibc in the json doc
-    assert "glibc" in [s["name"] for s in sbom_json["packages"]], f"missing glibc in {sbom_json}"
+    ]))
+    basename = f"centos-9-minimal-raw-{platform.machine()}"
+    path = output_dir / basename / f"{basename}.spdx.json"
+    assert list(output_dir.rglob("*.spdx.json")) == [path]
+    doc = json.loads(path.read_text())
+    assert doc["spdxVersion"] == "SPDX-2.3"
+    assert doc["name"] == basename
+    packages = {p["SPDXID"]: p for p in doc["packages"]}
+    assert not packages["SPDXRef-Image"].get("checksums")
+    edges = {(r["spdxElementId"], r["relationshipType"], r["relatedSpdxElement"])
+             for r in doc["relationships"]}
+    assert ("SPDXRef-DOCUMENT", "DESCRIBES", "SPDXRef-Image") in edges
+    os_pipeline = next(p for p in manifest["pipelines"] if p["name"] == "os")
+    build_name = os_pipeline["build"].removeprefix("name:")
+    pipelines = {p["name"]: pkg_id for pkg_id, p in packages.items()
+                 if p.get("summary") == "osbuild pipeline"}
+    assert (pipelines[build_name], "BUILD_TOOL_OF", pipelines["os"]) in edges
+    assert any(packages[target]["name"] == "glibc" for source, rel, target in edges
+               if source == pipelines["os"] and rel == "CONTAINS")
+    assert any(source == pipelines[build_name] and rel == "CONTAINS" for source, rel, _ in edges)
 
 
 @pytest.mark.skipif(os.getuid() != 0, reason="needs root")

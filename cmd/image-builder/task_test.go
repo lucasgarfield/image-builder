@@ -1,7 +1,10 @@
 package main_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +12,7 @@ import (
 	main "github.com/osbuild/image-builder/cmd/image-builder"
 	"github.com/osbuild/image-builder/internal/testutil"
 	"github.com/osbuild/image-builder/pkg/arch"
+	"github.com/osbuild/image-builder/pkg/sbom"
 	testrepos "github.com/osbuild/image-builder/test/data/repositories"
 	"github.com/stretchr/testify/require"
 )
@@ -43,8 +47,8 @@ func TestTaskIntegrationArgs(t *testing.T) {
 		},
 		{
 			args:               []string{"--with-sbom"},
-			expectedFilesInit:  []string{prefix("manifest.json"), prefix("buildroot-build.spdx.json"), prefix("image-os.spdx.json")},
-			expectedFilesBuild: []string{prefix("qcow2")},
+			expectedFilesInit:  []string{prefix("manifest.json"), "sbom.pb"},
+			expectedFilesBuild: []string{prefix("qcow2"), prefix("spdx.json")},
 		},
 		{
 			args:               []string{"--with-buildlog"},
@@ -52,13 +56,8 @@ func TestTaskIntegrationArgs(t *testing.T) {
 			expectedFilesBuild: []string{prefix("qcow2"), prefix("buildlog")},
 		},
 		{
-			args:               []string{"--with-sbom", "--with-buildlog"},
-			expectedFilesInit:  []string{prefix("manifest.json"), prefix("buildroot-build.spdx.json"), prefix("image-os.spdx.json")},
-			expectedFilesBuild: []string{prefix("qcow2"), prefix("buildlog")},
-		},
-		{
-			args:               []string{"--with-sbom", "--with-buildlog", "--with-rpmlist"},
-			expectedFilesInit:  []string{prefix("manifest.json"), prefix("buildroot-build.spdx.json"), prefix("image-os.spdx.json"), prefix("rpmlist.json")},
+			args:               []string{"--with-buildlog", "--with-rpmlist"},
+			expectedFilesInit:  []string{prefix("manifest.json"), prefix("rpmlist.json")},
 			expectedFilesBuild: []string{prefix("qcow2"), prefix("buildlog")},
 		},
 	} {
@@ -165,4 +164,56 @@ func dirRelative(t *testing.T, dir string) []string {
 	}
 
 	return stripped
+}
+
+func TestTaskBuildWithSBOM(t *testing.T) {
+	mockSBOMManifestGeneration(t)
+	dir := t.TempDir()
+	restore := main.MockOsArgs([]string{
+		"task", "init",
+		"--image-type", "qcow2",
+		"--distro", "centos-9",
+		"--output-name", "image",
+		"--with-sbom",
+		dir,
+	})
+	defer restore()
+	testutil.MockCommand(t, "osbuild", makeFakeOsbuildScript())
+	require.NoError(t, main.Run())
+
+	sidecarPath := filepath.Join(dir, "sbom.pb")
+	data, err := os.ReadFile(sidecarPath)
+	require.NoError(t, err)
+	require.False(t, json.Valid(data))
+	initial, err := sbom.ReadProto(bytes.NewReader(data))
+	require.NoError(t, err)
+	var initialSPDX bytes.Buffer
+	require.NoError(t, initial.Write(&initialSPDX, sbom.FormatSPDX23JSON))
+	var initialDoc spdxDoc
+	require.NoError(t, json.Unmarshal(initialSPDX.Bytes(), &initialDoc))
+	initialRoot := assertSBOMContents(t, initialDoc, "image")
+	require.Empty(t, initialRoot.FileName)
+	require.Empty(t, initialRoot.Checksums)
+	require.NoFileExists(t, filepath.Join(dir, "image.spdx.json"))
+
+	restore = main.MockOsArgs([]string{"task", "build-image", dir})
+	defer restore()
+	testutil.MockCommand(t, "osbuild", makeFakeOsbuildScript())
+	require.NoError(t, main.Run())
+	doc := readSPDX(t, filepath.Join(dir, "image.spdx.json"))
+	assertImageSBOM(t, doc, "image", filepath.Join(dir, "image.qcow2"))
+	require.NotEmpty(t, initialDoc.DocumentNamespace)
+	require.Equal(t, initialDoc.DocumentNamespace, doc.DocumentNamespace)
+	require.Equal(t, initialRoot.SPDXID, spdxPackageNamed(t, doc, "image").SPDXID)
+	unchanged, err := os.ReadFile(sidecarPath)
+	require.NoError(t, err)
+	require.Equal(t, data, unchanged)
+}
+
+func TestTaskInitWithSBOMRejectsExtra(t *testing.T) {
+	t.Cleanup(main.MockOsArgs([]string{
+		"task", "init", "--distro", "centos-9", "--with-sbom", "--image-type", "qcow2",
+		"--with-extra", "sysext:nginx", t.TempDir(),
+	}))
+	require.ErrorContains(t, main.Run(), "--with-sbom cannot be combined with --with-extra")
 }

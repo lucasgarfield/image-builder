@@ -170,13 +170,6 @@ $ ls *.osbuild-manifest.json
 fedora-43-server-qcow2-x86_64.osbuild-manifest.json
 ```
 
-`--with-sbom` places an [SPDX](https://spdx.dev/) Software Bill of Materials document alongside the image.
-
-```console
-$ sudo image-builder build --with-sbom --distro fedora-43 server-qcow2
-# ...
-```
-
 `--with-buildlog` writes the full osbuild build log to `<basename>.buildlog` in the output directory. This can be useful for debugging failed or unexpected builds.
 
 ```console
@@ -196,6 +189,42 @@ Metrics:
 	build: org.osbuild.rpm: 15s
 	os: org.osbuild.selinux: 5s
 ```
+
+#### SBOM
+
+`build --with-sbom` writes one SPDX 2.3 JSON SBOM as `<basename>.spdx.json` alongside the built image. The SBOM describes the image, records the artifact filename and SHA-256 digest, and includes the resolved content for each pipeline that contributes to the image.
+
+```console
+$ sudo image-builder build --with-sbom --distro fedora-43 server-qcow2
+# ...
+$ ls fedora-43-server-qcow2-x86_64/*.spdx.json
+fedora-43-server-qcow2-x86_64/fedora-43-server-qcow2-x86_64.spdx.json
+```
+
+To get an SBOM without building the image, use `manifest --with-sbom`. The manifest is still written to standard output. The SBOM is written to the output directory (set with `--output-dir`) and omits the artifact filename and digest because the image has not been built.
+
+```console
+$ image-builder manifest --with-sbom --distro fedora-43 server-qcow2 > manifest.json
+```
+
+For a multi-step build, `task init --with-sbom` saves the SBOM as `sbom.pb` in the task directory. Keep this file with the task: `task build-image` adds the artifact filename and digest and writes `<basename>.spdx.json` alongside the image.
+
+```console
+$ image-builder task init --distro fedora-43 --image-type server-qcow2 --with-sbom ./my-task
+$ image-builder task prefetch ./my-task
+$ sudo image-builder task build-image ./my-task
+# ...
+```
+
+SBOM export requires a single image artifact and cannot be combined with `--with-extra`. To record the finished artifact's SHA-256, the export must be a regular file. For a directory export, use `manifest --with-sbom` to obtain the pre-build document without an artifact digest. The CLI includes the selected export's buildroot as a build input, not as installed image content. Unrelated export branches are excluded. If a stage copies content from a buildroot (for example, Aboot bootloader files), that buildroot is also a content producer and is shown as such. It lists resolved RPMs and identifies input containers, OSTree commits, and Flatpaks by their digests; it does not inventory packages inside those inputs.
+
+The SPDX document describes `SPDXRef-Image`, identified by a `pkg:generic` PURL. When an image version is supplied, it appears in both `versionInfo` and the PURL; the builder version is not used as the image version. Missing package license and copyright assertions are written as `NOASSERTION`.
+
+The build request selects the export that roots the SBOM. Other exportable pipelines in the same manifest are not roots: their inputs appear only if the selected export also uses them. Start at the image's `CONTAINS` relationship to the selected pipeline. Follow `HAS_PREREQUISITE` to the pipelines whose output its stages consume, including format conversions that install no packages. Pipeline descriptions identify their role (`artifact`, `payload`, or `buildroot`). `BUILD_TOOL_OF` points from the build environment or reference tree to the pipeline that uses it. For a system extension built against a reference OS, the payload inventory uses only the extension's final RPM transaction. The reference OS is a build input, not part of the extension payload.
+
+Each pipeline `CONTAINS` its own RPM occurrences. The same RPM installed in two pipelines has two SPDX IDs but retains the same PURL. `DEPENDS_ON` links a hard requirement to its unique matching provider in that pipeline's resolved packages. Missing dependency metadata, rich requirements, ambiguous providers, and optional dependencies do not produce speculative edges.
+
+RPM entries retain their download locations and use the repository's configured `id`, when available, in the `repository_id` PURL qualifier. For example, a repository entry in a custom `--force-repo-dir` can set `"id": "rhel-9-for-x86_64-baseos-rpms"`. A bare repository URL has no canonical ID: image-builder does not guess one from a URL or publish the solver's internal key. An RPM license that cannot be represented as a valid SPDX expression is reported as `NOASSERTION`, with the original nonempty value in `licenseComments`.
 
 ### ostree
 

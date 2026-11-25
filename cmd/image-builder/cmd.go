@@ -235,7 +235,7 @@ func manifestFlags(cmd *cobra.Command) error {
 	if err := flagSet.MarkHidden("use-librepo"); err != nil {
 		return err
 	}
-	flagSet.Bool("with-sbom", false, `export SPDX SBOM document`)
+	flagSet.Bool("with-sbom", false, `export an SPDX SBOM`)
 	flagSet.Bool("with-rpmlist", false, `export RPM list as JSON`)
 	if err := flagSet.MarkHidden("with-rpmlist"); err != nil {
 		return err
